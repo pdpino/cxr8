@@ -8,3 +8,4 @@ __pycache__/*
 Training.ipynb
 runs/*
 
+pyenv/

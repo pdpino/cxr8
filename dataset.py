@@ -38,6 +38,10 @@ class CXRDataset(Dataset):
         self.label_index = pd.read_csv(self.index_dir, header=0)
         self.bbox_index = pd.read_csv(os.path.join(root_dir, 'BBox_List_2017.csv'), header=0)
 
+        # Keep only the images in the directory
+        available_images = os.listdir(self.image_dir)
+        self.label_index = self.label_index.loc[self.label_index['FileName'].isin(available_images)]
+        self.bbox_index = self.bbox_index.loc[self.bbox_index['Image Index'].isin(available_images)]
         
     def __len__(self):
         return int(len(self.label_index)*0.1)
@@ -80,6 +84,11 @@ class CXRDataset_BBox_only(Dataset):
         self.label_index = pd.read_csv(self.index_dir, header=0)
         self.bbox_index = pd.read_csv(os.path.join(root_dir, 'BBox_List_2017.csv'), header=0)
         self.data_arg = data_arg
+        
+        # Keep only the images in the directory
+        available_images = os.listdir(self.image_dir)
+        self.label_index = self.label_index.loc[self.label_index['FileName'].isin(available_images)]
+        self.bbox_index = self.bbox_index.loc[self.bbox_index['Image Index'].isin(available_images)]
         
     def __len__(self):
         return len(self.bbox_index)
