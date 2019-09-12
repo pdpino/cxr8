@@ -11,14 +11,19 @@ from tensorboardX import SummaryWriter
 import time
 import os
 
+# FIXME: fix deprecations
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 batch_size = 4
 num_epochs = 100
 learning_rate = 1e-6
 regulization = 0
 model_save_dir = './savedModels'
 model_name = 'net_v1_lr_1e-6_bbox_data_arg'
-log_dir = './runs'
-data_root_dir = './dataset'
+log_dir = '/mnt/data/chest-x-ray-8/runs'
+data_root_dir = '/mnt/data/chest-x-ray-8/dataset'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -178,11 +183,11 @@ def training(model):
                 epoch_auc_ave = 0
                 epoch_auc = [0 for _ in range(len(class_names))]
 
-            if phase == 'val':
-                writer[phase].add_scalar('loss', epoch_loss, iter_num)
-                writer[phase].add_scalar('auc', epoch_auc_ave, iter_num)
-            for i, c in enumerate(class_names):
-                writer[phase].add_pr_curve(c, np.array(label_list[:][i]), np.array(output_list[:][i]), iter_num)
+#             if phase == 'val':
+#                 writer[phase].add_scalar('loss', epoch_loss, iter_num)
+#                 writer[phase].add_scalar('auc', epoch_auc_ave, iter_num)
+#             for i, c in enumerate(class_names):
+#                 writer[phase].add_pr_curve(c, np.array(label_list[:][i]), np.array(output_list[:][i]), iter_num)
             
             log_str = ''
             log_str += '{} Loss: {:.4f} AUC: {:.4f}  \n\n'.format(
