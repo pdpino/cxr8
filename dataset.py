@@ -27,19 +27,20 @@ disease_categories = {
 
 class CXRDataset(Dataset):
 
-    # FIXME: transform can't be None, since the return type must be a Tensor (not Pillow.Image)
-    # can use: torchvision.transforms.ToTensor() by default
-    def __init__(self, root_dir, dataset_type = 'train', transform = None, n_diseases=8):
+    def __init__(self, root_dir, dataset_type='train', transform=None, n_diseases=8):
         if dataset_type not in ['train', 'val', 'test']:
             raise ValueError("No such type, must be 'train', 'val', or 'test'")
         
         self.image_dir = os.path.join(root_dir, 'images')
-        self.transform = transform
+
+        self.transform = transform if transform is not None else transforms.ToTensor()
 
         # Load csv files
         labels_fname = os.path.join(root_dir, dataset_type + '_label.csv')
         self.label_index = pd.read_csv(labels_fname, header=0)
-        self.bbox_index = pd.read_csv(os.path.join(root_dir, 'BBox_List_2017.csv'), header=0)
+        
+        bbox_fname = os.path.join(root_dir, 'BBox_List_2017.csv')
+        self.bbox_index = pd.read_csv(bbox_fname, header=0)
         
         # Drop Bbox file unnamed columns (are empty)
         drop_unnamed = [col for col in self.bbox_index.columns if col.startswith("Unnamed")]
@@ -74,29 +75,45 @@ class CXRDataset(Dataset):
         # Extract labels
         labels = row[1:1+self.n_diseases].to_numpy().astype('int')
         
-        # Array indicating if the bbox is valid for each disease
-        bbox_valid = np.zeros(self.n_diseases)
-        for i in range(self.n_diseases):
-            if labels[i] == 0:
-                   bbox_valid[i] = 1
-        
-        # Save bboxes
-        bbox = np.zeros([self.n_diseases, 512, 512])
+        # Get bboxes
+        bboxes = torch.zeros(self.n_diseases, 4) # 4: x, y, w, h
+        bbox_valid = torch.zeros(self.n_diseases)
+
         rows = self.bbox_index.loc[self.bbox_index['Image Index']==image_name]
-        for index, row in rows.iterrows():
-            image_name, disease_name, x, y, w, h = row
+        for _, row in rows.iterrows():
+            _, disease_name, x, y, w, h = row
+            x = int(x)
             y = int(y)
+            w = int(w)
             h = int(h)
 
-            x = int(x)
-            w = int(w)
-
             disease_index = disease_categories[disease_name]
-            
-            bbox[disease_index, y:y+h, x:x+w] = 1
+            for j, value in enumerate([x, y, w, h]):
+                bboxes[disease_index, j] = value
+
             bbox_valid[disease_index] = 1
         
-        return image, labels, image_name, bbox, bbox_valid
+        return image, labels, image_name, bboxes, bbox_valid
+        
+        # Save bboxes
+
+        # TODO: make this a get_bbox_as_image() function, if necessary
+#         bbox = np.zeros([self.n_diseases, 512, 512])
+#         rows = self.bbox_index.loc[self.bbox_index['Image Index']==image_name]
+#         for index, row in rows.iterrows():
+#             image_name, disease_name, x, y, w, h = row
+#             y = int(y)
+#             h = int(h)
+
+#             x = int(x)
+#             w = int(w)
+
+#             disease_index = disease_categories[disease_name]
+            
+#             bbox[disease_index, y:y+h, x:x+w] = 1
+#             bbox_valid[disease_index] = 1
+        
+        # return image, labels, image_name, bbox, bbox_valid
     
     
 class CXRDataset_BBox_only(Dataset):
