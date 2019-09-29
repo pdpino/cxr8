@@ -8,26 +8,12 @@ from PIL import Image
 import os
 import random
 
-disease_categories = {
-        'Atelectasis': 0,
-        'Cardiomegaly': 1,
-        'Effusion': 2,
-        'Infiltrate': 3,
-        'Mass': 4,
-        'Nodule': 5,
-        'Pneumonia': 6,
-        'Pneumothorax': 7,
-        'Consolidation': 8,
-        'Edema': 9,
-        'Emphysema': 10,
-        'Fibrosis': 11,
-        'Pleural_Thickening': 12,
-        'Hernia': 13,
-        }
+import utils
 
 class CXRDataset(Dataset):
 
-    def __init__(self, root_dir, dataset_type='train', transform=None, n_diseases=8):
+    def __init__(self, root_dir, dataset_type='train', transform=None, diseases=None, max_images=None):
+        """Create a Dataset object."""
         if dataset_type not in ['train', 'val', 'test']:
             raise ValueError("No such type, must be 'train', 'val', or 'test'")
         
@@ -46,13 +32,25 @@ class CXRDataset(Dataset):
         drop_unnamed = [col for col in self.bbox_index.columns if col.startswith("Unnamed")]
         self.bbox_index.drop(drop_unnamed, axis=1, inplace=True)
         
-        # Get classes names
-        self.classes = list(self.label_index.columns)[1:1+n_diseases]
-        self.n_diseases = n_diseases
+        # Choose classes names
+        if not diseases:
+            diseases = list(ALL_DISEASES)
 
-        # Keep only the images in the directory
-        available_images = os.listdir(self.image_dir)
-        self.label_index = self.label_index.loc[self.label_index['FileName'].isin(available_images)]
+        self.classes = list(diseases)
+        self.n_diseases = len(diseases)
+        
+        # REVIEW: filter label_index to contain only chosen diseases?
+        # list(self.label_index.columns)[1:1+n_diseases]
+
+        # Keep only the images in the directory # and max_images
+        available_images = set(os.listdir(self.image_dir))
+        labeled_images = set(self.label_index['FileName']).intersection(available_images)
+        if max_images:
+            labeled_images = set(list(labeled_images)[:max_images])
+
+        self.label_index = self.label_index.loc[self.label_index['FileName'].isin(labeled_images)]
+        
+        # The bbox_index is always kept full (all images)
         self.bbox_index = self.bbox_index.loc[self.bbox_index['Image Index'].isin(available_images)]
         
     def size(self):
@@ -73,7 +71,7 @@ class CXRDataset(Dataset):
             image = self.transform(image)
 
         # Extract labels
-        labels = row[1:1+self.n_diseases].to_numpy().astype('int')
+        labels = row[self.classes].to_numpy().astype('int')
         
         # Get bboxes
         bboxes = torch.zeros(self.n_diseases, 4) # 4: x, y, w, h
@@ -87,7 +85,7 @@ class CXRDataset(Dataset):
             w = int(w)
             h = int(h)
 
-            disease_index = disease_categories[disease_name]
+            disease_index = utils.DISEASE_INDEX[disease_name]
             for j, value in enumerate([x, y, w, h]):
                 bboxes[disease_index, j] = value
 
