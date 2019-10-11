@@ -10,15 +10,18 @@ import random
 
 import utils
 
+
 class CXRDataset(Dataset):
 
-    def __init__(self, root_dir, dataset_type='train', transform=None, diseases=None, max_images=None):
+    def __init__(self, root_dir, dataset_type='train', image_format="L", transform=None, diseases=None, max_images=None):
         """Create a Dataset object."""
         if dataset_type not in ['train', 'val', 'test']:
             raise ValueError("No such type, must be 'train', 'val', or 'test'")
         
         self.image_dir = os.path.join(root_dir, 'images')
 
+        self.image_format = image_format
+        
         self.transform = transform if transform is not None else transforms.ToTensor()
 
         # Load csv files
@@ -32,15 +35,25 @@ class CXRDataset(Dataset):
         drop_unnamed = [col for col in self.bbox_index.columns if col.startswith("Unnamed")]
         self.bbox_index.drop(drop_unnamed, axis=1, inplace=True)
         
-        # Choose classes names
+        # Choose diseases names
         if not diseases:
-            diseases = list(ALL_DISEASES)
+            self.classes = list(utils.ALL_DISEASES)
+        else:
+            # Keep only the valid ones
+            all_diseases_set = set(utils.ALL_DISEASES)
+            diseases_set = set(diseases)
+            self.classes = list(diseases_set.intersection(all_diseases_set))
+            
+            not_found_diseases = list(diseases_set - all_diseases_set)
+            if not_found_diseases:
+                print("Diseases not found: ", not_found_diseases, "(ignoring)")
+            
 
-        self.classes = list(diseases)
-        self.n_diseases = len(diseases)
+        self.n_diseases = len(self.classes)
         
-        # REVIEW: filter label_index to contain only chosen diseases?
-        # list(self.label_index.columns)[1:1+n_diseases]
+        # Filter labels DataFrame
+        columns = ["FileName"] + self.classes
+        self.label_index = self.label_index[columns]
 
         # Keep only the images in the directory # and max_images
         available_images = set(os.listdir(self.image_dir))
@@ -53,20 +66,83 @@ class CXRDataset(Dataset):
         # The bbox_index is always kept full (all images)
         self.bbox_index = self.bbox_index.loc[self.bbox_index['Image Index'].isin(available_images)]
         
+        # Precompute items
+        self.precomputed = None
+        self.precompute()
+        
     def size(self):
-        return self.label_index.shape
+        n_images, _ = self.label_index.shape
+        return (n_images, self.n_diseases)
 
+    def get_by_name(self, image_name):
+        idx = self.names_to_idx[image_name]
+
+        return self[idx]
+        
+    
     def __len__(self):
         n_samples, _ = self.label_index.shape
         return n_samples
 
     def __getitem__(self, idx):
+        image_name, labels, bboxes, bbox_valid = self.precomputed[idx]
+        
+        # Load the image
+        image_fname = os.path.join(self.image_dir, image_name)
+        image = Image.open(image_fname).convert(self.image_format)
+        if self.transform:
+            image = self.transform(image)
+        
+        return image, labels, image_name, bboxes, bbox_valid
+    
+    def precompute(self):
+        self.precomputed = []
+        self.names_to_idx = dict()
+        for idx in range(len(self)):
+            item = self.precompute_item(idx)
+            image_name = item[0]
+
+            self.precomputed.append(item)
+            
+            self.names_to_idx[image_name] = idx
+
+
+    def precompute_item(self, idx):
+        row = self.label_index.iloc[idx]
+        
+        # Image name
+        image_name = row[0]
+
+        # Extract labels
+        labels = row[self.classes].to_numpy().astype('int')
+        
+        # Get bboxes
+        bboxes = torch.zeros(self.n_diseases, 4) # 4: x, y, w, h
+        bbox_valid = torch.zeros(self.n_diseases)
+
+        rows = self.bbox_index.loc[self.bbox_index['Image Index']==image_name]
+        for _, row in rows.iterrows():
+            _, disease_name, x, y, w, h = row
+            x = int(x)
+            y = int(y)
+            w = int(w)
+            h = int(h)
+
+            disease_index = utils.DISEASE_INDEX[disease_name]
+            for j, value in enumerate([x, y, w, h]):
+                bboxes[disease_index, j] = value
+
+            bbox_valid[disease_index] = 1
+        
+        return image_name, labels, bboxes, bbox_valid
+    
+    def get_items_old(self, idx):
         row = self.label_index.iloc[idx]
         
         # Load image
         image_name = row[0]        
         image_fname = os.path.join(self.image_dir, image_name)
-        image = Image.open(image_fname).convert('L')
+        image = Image.open(image_fname).convert(self.image_format)
         if self.transform:
             image = self.transform(image)
 
