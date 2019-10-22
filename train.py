@@ -1,230 +1,373 @@
-from dataset import CXRDataset, CXRDataset_BBox_only
-from model import Model
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from sklearn.metrics import roc_auc_score
-import numpy as np
 from tensorboardX import SummaryWriter
+from ignite.engine import Engine, Events
+from ignite.metrics import Accuracy, Precision, Recall, RunningAverage #, EpochMetric
+from ignite.handlers import Timer
+
+import numpy as np
+import argparse
 import time
 import os
 
-# FIXME: fix deprecations
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", category=UserWarning)
+from dataset import CXRDataset
+from model import ResnetBasedModel
+import utils
+import utilsT
 
-batch_size = 4
-num_epochs = 100
-learning_rate = 1e-6
-regulization = 0
-model_save_dir = './savedModels'
-model_name = 'net_v1_lr_1e-6_bbox_data_arg'
-log_dir = '/mnt/data/chest-x-ray-8/runs'
-data_root_dir = '/mnt/data/chest-x-ray-8/dataset'
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+ALL_METRICS = ["roc_auc", "prec", "recall", "acc"]
 
-mean = [0.50576189]
-def make_dataLoader():
-    trans = {}
-    trans['train'] = transforms.Compose([
-        transforms.Resize(512),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, [1.])
-    ])
-    trans['val'] = transforms.Compose([
-        transforms.Resize(512),
-        transforms.ToTensor(),
-        transforms.Normalize(mean, [1.])
-    ])
-    datasets = {
-        'train': CXRDataset_BBox_only(data_root_dir, transform=trans['train'], data_arg=True),
-        'val': CXRDataset(data_root_dir, dataset_type='val', transform=trans['val'])
+# FIXME: fix deprecations # OUTDATED??
+# import warnings
+# warnings.filterwarnings("ignore", category=DeprecationWarning)
+# warnings.filterwarnings("ignore", category=UserWarning)
+
+
+def get_model_fname(base_dir, run_name, experiment_mode="debug"):
+    folder = os.path.join(base_dir, "models")
+    if experiment_mode:
+        folder = os.path.join(folder, experiment_mode)
+    return os.path.join(folder, run_name + ".pth")
+
+
+def get_log_dir(base_dir, run_name, experiment_mode="debug"):
+    folder = os.path.join(base_dir, "runs")
+    if experiment_mode:
+        folder = os.path.join(folder, experiment_mode)
+    return os.path.join(folder, run_name)
+
+
+def get_step_fn(model, optimizer, device, training=True):
+    """Creates a step function for an Engine."""
+    def step_fn(engine, data_batch):
+        # Input and sizes
+        images, labels, names, _, _ = data_batch
+        n_samples, n_labels = labels.size()
+
+        # Move tensors to GPU
+        images = images.to(device)
+        labels = labels.to(device)
+
+        # Enable training
+        model.train(training)
+        torch.set_grad_enabled(training) # enable recording gradients
+
+        # zero the parameter gradients
+        optimizer.zero_grad()
+
+        # Forward, receive outputs from the model and segments (bboxes)
+        outputs, embedding_unused, segments_unused = model(images)
+
+        # Compute classification loss
+        loss = utilsT.weighted_bce(outputs, labels)
+
+        batch_loss = loss.item()
+
+        if training:
+            loss.backward()
+            optimizer.step()
+
+        return batch_loss, outputs, labels
+
+    return step_fn
+
+def get_transform_one_label(label_index, use_round=True):
+    """Creates a transform function to extract one label from a multi-label output."""
+    def transform_fn(output):
+        _, y_pred, y_true = output
+        
+        y_pred = y_pred[:, label_index]
+        y_true = y_true[:, label_index]
+        
+        if use_round:
+            y_pred = torch.round(y_pred)
+
+        return y_pred, y_true
+    return transform_fn
+
+
+def attach_metrics(engine, chosen_diseases, metric_name, MetricClass, use_round):
+    """Attaches one metric per label to an engine."""
+    for index, disease in enumerate(chosen_diseases):
+        transform_disease = get_transform_one_label(index, use_round=use_round)
+
+        metric = MetricClass(output_transform=transform_disease)
+        metric.attach(engine, "{}_{}".format(metric_name, disease))
+
+
+def init_empty_model(chosen_diseases, train_resnet=False):
+    return ResnetBasedModel(train_resnet=train_resnet, n_diseases=len(chosen_diseases))
+
+
+def save_model(base_dir, run_name, experiment_mode, hparam_dict, trainer, model, optimizer):
+    model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
+    torch.save({
+        "hparams": hparam_dict,
+        "epoch": trainer.state.epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+    }, model_fname)
+
+
+def load_model(model_fname):
+    checkpoint = torch.load(model_fname)
+    learning_rate = checkpoint["hparams"]["lr"]
+    optimizer_moment = checkpoint["hparams"]["opt_moment"]
+    weight_decay = checkpoint["hparams"]["weight_decay"]
+
+    model = init_empty_model()
+    optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=optimizer_moment, weight_decay=weight_decay)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    return model, optimizer
+
+
+def tb_write_graph(writer, model, dataloader, device):
+    images = next(iter(dataloader))[0]
+    images = images.to(device)
+    writer.add_graph(model, images)
+
+
+def train_model(base_dir=".",
+                chosen_diseases=None,
+                n_epochs=10,
+                batch_size=4, lr=1e-6, moment=0.9, decay=0, reg=0,
+                train_resnet=False,
+                image_format="RGB",
+                log_metrics=None, flush_secs=120,
+                train_max_images=None, val_max_images=None,
+                experiment_mode="debug",
+                save=True,
+                write_graph=False,
+               ):
+    
+    # Choose GPU
+    device = utilsT.get_torch_device()
+    print("Using device: ", device)
+    
+    # Common folders
+    dataset_dir = os.path.join(base_dir, "dataset")
+    
+    # Transform functions
+    mean = 0.50576189
+    transform_image = transforms.Compose([transforms.Resize(512),
+                                          transforms.ToTensor(),
+                                          transforms.Normalize([mean], [1.])
+                                         ])
+
+    # Dataset handling
+    train_dataset = CXRDataset(dataset_dir, transform=transform_image, diseases=chosen_diseases,
+                               max_images=train_max_images, image_format=image_format)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
+    
+    val_dataset = CXRDataset(dataset_dir, dataset_type="val", transform=transform_image,
+                             diseases=chosen_diseases, max_images=val_max_images, image_format=image_format)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
+
+    # Should be the same than chosen_diseases
+    chosen_diseases = list(train_dataset.classes)
+    
+    # Create model and optim
+    model = init_empty_model(chosen_diseases, train_resnet=train_resnet).to(device)
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=moment, weight_decay=decay)
+    
+    # Tensorboard log options
+    loss_name = "wbce_loss"
+
+    run_name = utils.get_timestamp()
+    if len(chosen_diseases) == 1:
+        run_name += "_{}".format(chosen_diseases[0])
+    elif len(chosen_diseases) == 14:
+        run_name += "_all"
+
+    log_dir = get_log_dir(base_dir, run_name, experiment_mode=experiment_mode)
+
+    print("Run name: ", run_name)
+    print("Saved TB in: ", log_dir)
+
+    writer = SummaryWriter(log_dir=log_dir, flush_secs=flush_secs)
+    
+
+    # Create validator engine
+    validator = Engine(get_step_fn(model, optimizer, device, False))
+
+    val_loss = RunningAverage(output_transform=lambda x: x[0], alpha=1)
+    val_loss.attach(validator, loss_name)
+    
+    attach_metrics(validator, chosen_diseases, "prec", Precision, True)
+    attach_metrics(validator, chosen_diseases, "recall", Recall, True)
+    attach_metrics(validator, chosen_diseases, "acc", Accuracy, True)
+    attach_metrics(validator, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
+    
+    
+    # Create trainer engine
+    trainer = Engine(get_step_fn(model, optimizer, device, True))
+    
+    train_loss = RunningAverage(output_transform=lambda x: x[0], alpha=1)
+    train_loss.attach(trainer, loss_name)
+    
+    attach_metrics(trainer, chosen_diseases, "acc", Accuracy, True)
+    attach_metrics(trainer, chosen_diseases, "prec", Precision, True)
+    attach_metrics(trainer, chosen_diseases, "recall", Recall, True)
+    attach_metrics(trainer, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
+    
+    timer = Timer(average=True)
+    timer.attach(trainer, start=Events.EPOCH_STARTED, step=Events.EPOCH_COMPLETED)
+
+
+    # Metrics callbacks
+    if log_metrics is None:
+        log_metrics = list(ALL_METRICS)
+
+    def _write_metrics(run_type, metrics, epoch, wall_time):
+        loss = metrics.get(loss_name, 0)
+
+        writer.add_scalar("Loss/" + run_type, loss, epoch, wall_time)
+
+        for metric_base_name in log_metrics:
+            for disease in chosen_diseases:
+                metric_value = metrics.get("{}_{}".format(metric_base_name, disease), -1)
+                writer.add_scalar("{}_{}/{}".format(metric_base_name, disease, run_type), metric_value, epoch, wall_time)
+
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def tb_write_metrics(trainer):
+        epoch = trainer.state.epoch
+        max_epochs = trainer.state.max_epochs
+
+        # Run on evaluation
+        validator.run(val_dataloader, 1)
+
+        # Common time
+        wall_time = time.time()
+
+        # Log all metrics to TB
+        _write_metrics("train", trainer.state.metrics, epoch, wall_time)
+        _write_metrics("val", validator.state.metrics, epoch, wall_time)
+
+        train_loss = trainer.state.metrics.get(loss_name, 0)
+        val_loss = validator.state.metrics.get(loss_name, 0)
+
+        print("Finished epoch {}/{}, loss {} (val {})".format(epoch, max_epochs, train_loss, val_loss))
+
+    # Train
+    print("-" * 50)
+    print("Training...")
+    trainer.run(train_dataloader, n_epochs)
+    
+
+    # Capture time
+    secs_per_epoch = timer.value()
+    duration_per_epoch = utils.duration_to_str(int(secs_per_epoch))
+    print("Average time per epoch: ", duration_per_epoch)
+    
+
+    ## Write hparams
+    # metrics
+    metric_dict = {}
+    def copy_metrics(engine, engine_name):
+        for metric_name, metric_value in engine.state.metrics.items():
+            metric_dict["{}_{}".format(engine_name, metric_name)] = metric_value
+    copy_metrics(trainer, "train")
+    copy_metrics(validator, "val")
+        
+    # hparams
+    train_samples, _ = train_dataset.size()
+    val_samples, _ = val_dataset.size()
+
+    hparam_dict = {
+        "n_diseases": len(chosen_diseases),
+        "diseases": ",".join(chosen_diseases),
+        "n_epochs": n_epochs,
+        "batch_size": batch_size,
+        "samples (train, val)": "{},{}".format(train_samples, val_samples),
+        "train_resnet": train_resnet,
+        "lr": lr,
+        "opt_moment": moment,
+        "weight_decay": decay,
+        "regularization": reg,
+        "duration_per_epoch": duration_per_epoch,
     }
-    dataloaders = {x: DataLoader(datasets[x], batch_size=batch_size, shuffle=True, num_workers=4)
-                    for x in ['train', 'val']}
-    dataset_sizes = {x: len(datasets[x]) for x in ['train', 'val']}
-    class_names = datasets['train'].classes
 
-    print(dataset_sizes)
+    writer.add_hparams(hparam_dict, metric_dict)
     
-    return dataloaders, dataset_sizes, class_names
-
-def weighted_BCELoss(output, target, weights=None):
-    output = output.clamp(min=1e-5, max=1-1e-5)
-    target = target.float()
-    if weights is not None:
-        assert len(weights) == 2
-
-        loss = -weights[0] * (target * torch.log(output)) - weights[1] * ((1 - target) * torch.log(1 - output))
-    else:
-        loss = -target * torch.log(output) - (1 - target) * torch.log(1 - output)
-
-    return torch.sum(loss)
-
-def training(model):
-    writer = {x: SummaryWriter(log_dir=os.path.join(log_dir, model_name, x),
-                comment=model_name)
-          for x in ['train', 'val']}
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=0)
-    #scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20,30], gamma=0.1)
-    dataloaders, dataset_sizes, class_names = make_dataLoader()
     
-    since = time.time()
-    best_model_wts = model.state_dict()
-    best_auc = []
-    best_auc_ave = 0.0
-    iter_num = 0
-
-    for epoch in range(num_epochs):
-        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
-        print('-' * 10)
-        #scheduler.step()
-        # Each epoch has a training and validation phase
-        for phase in ['train', 'val']:
-            if phase == 'train':
-                model.train(True)  # Set model to training mode
-            else:
-                model.train(False)  # Set model to evaluate mode
-
-            running_loss = 0.0
-            output_list = []
-            label_list = []
-            
-            # Iterate over data.
-            for idx, data in enumerate(dataloaders[phase]):
-                # get the inputs
-                images, labels, names, bboxes, bbox_valids = data
-
-                images = images.to(device)
-                labels = labels.to(device)
-                
-                if phase == 'train':
-                    torch.set_grad_enabled(True)
-                else:
-                    torch.set_grad_enabled(False)
-                    
-                #calculate weight for loss
-                P = 0
-                N = 0
-                for label in labels:
-                    for v in label:
-                        if int(v) == 1: P += 1
-                        else: N += 1
-                if P!=0 and N!=0:
-                    BP = (P + N)/P
-                    BN = (P + N)/N
-                    weights = torch.tensor([BP, BN], dtype=torch.float).to(device)
-                else: weights = None
-
-                # zero the parameter gradients
-                optimizer.zero_grad()
-
-                # forward
-                outputs, segs = model(images)
-                
-                # remove invalid bbox and segmentation outputs
-                bbox_list = []
-                for i in range(bbox_valids.size(0)):
-                    bbox_list.append([])
-                    for j in range(8):
-                        if bbox_valids[i][j] == 1:
-                            bbox_list[i].append(bboxes[i][j])
-                    bbox_list[i] = torch.stack(bbox_list[i]).to(device)
-                
-                seg_list = []
-                for i in range(bbox_valids.size(0)):
-                    seg_list.append([])
-                    for j in range(8):
-                        if bbox_valids[i][j] == 1:
-                            seg_list[i].append(segs[i][j])
-                    seg_list[i] = torch.stack(seg_list[i]).to(device)
-                
-                # classification loss
-                loss = weighted_BCELoss(outputs, labels, weights=weights)
-                # segmentation loss
-                for i in range(len(seg_list)):
-                    loss += 5*weighted_BCELoss(seg_list[i], bbox_list[i], weights=torch.tensor([10., 1.]).to(device))/(512*512)
-
-                # backward + optimize only if in training phase
-                if phase == 'train':
-                    loss.backward()
-                    optimizer.step()
-                    iter_num += 1
-
-                # metrix
-                running_loss += loss.item()
-                outputs = outputs.detach().to('cpu').numpy()
-                labels = labels.detach().to('cpu').numpy()
-                for i in range(outputs.shape[0]):
-                    output_list.append(outputs[i].tolist())
-                    label_list.append(labels[i].tolist())
-                    
-                if idx%10 == 0:
-                    if phase == 'train':
-                        writer[phase].add_scalar('loss', loss.item()/outputs.shape[0], iter_num)
-                    print('\r{} {:.2f}%'.format(phase, 100*idx/len(dataloaders[phase])), end='\r')
-                if idx%100 == 0 and idx!=0:
-                    if phase == 'train':
-                        try:
-                            auc = roc_auc_score(np.array(label_list[-100*batch_size:]), np.array(output_list[-100*batch_size:]))
-                            writer[phase].add_scalar('auc', auc, iter_num)
-                        except:
-                            pass
-
-            epoch_loss = running_loss / dataset_sizes[phase]
-            try:
-                epoch_auc_ave = roc_auc_score(np.array(label_list), np.array(output_list))
-                epoch_auc = roc_auc_score(np.array(label_list), np.array(output_list), average=None)
-            except:
-                epoch_auc_ave = 0
-                epoch_auc = [0 for _ in range(len(class_names))]
-
-#             if phase == 'val':
-#                 writer[phase].add_scalar('loss', epoch_loss, iter_num)
-#                 writer[phase].add_scalar('auc', epoch_auc_ave, iter_num)
-#             for i, c in enumerate(class_names):
-#                 writer[phase].add_pr_curve(c, np.array(label_list[:][i]), np.array(output_list[:][i]), iter_num)
-            
-            log_str = ''
-            log_str += '{} Loss: {:.4f} AUC: {:.4f}  \n\n'.format(
-                phase, epoch_loss, epoch_auc_ave, epoch_auc)
-            for i, c in enumerate(class_names):
-                log_str += '{}: {:.4f}  \n'.format(c, epoch_auc[i])
-            log_str += '\n'
-            print(log_str)
-            writer[phase].add_text('log',log_str , iter_num)
-
-            # save model
-            if phase == 'val' and epoch_auc_ave > best_auc_ave:
-                best_auc = epoch_auc
-                best_auc_ave = epoch_auc_ave
-                best_model_wts = model.state_dict()
-                model_dir = os.path.join(model_save_dir, model_name+'.pth')
-                if not os.path.exists(model_save_dir):
-                    os.makedirs(model_save_dir)
-                torch.save(model.state_dict(), model_dir)
-                print('Model saved to %s'%(model_dir))
-                writer[phase].add_text('log','Model saved to %s\n\n'%(model_dir) , iter_num)
-
-        print()
-
-    time_elapsed = time.time() - since
-    print('Training complete in {:.0f}m {:.0f}s'.format(
-        time_elapsed // 60, time_elapsed % 60))
-    print('Best val AUC: {:4f}'.format(best_auc_ave))
-    print()
-    for i, c in enumerate(class_names):
-        print('{}: {:.4f} '.format(c, best_auc[i]))
-
-    # load best model weights
-    model.load_state_dict(best_model_wts)
+    # Save model to disk
+    if save:
+        save_model(base_dir, run_name, experiment_mode, hparam_dict, trainer, model, optimizer)
     
-    return model
+    
+    # Write graph to TB
+    if write_graph:
+        tb_write_graph(writer, model, train_dataloader, device)
 
-if __name__ == '__main__':
-    model = Model().to(device)
-    training(model)
+    # Close TB writer
+    writer.close()
+
+    return model, run_name
+
+    
+def parse_args():    
+    parser = argparse.ArgumentParser(description="Train a model", usage="%(prog)s [options]")
+    
+    parser.add_argument("--base-dir", default="/mnt/data/chest-x-ray-8", type=str, help="Base folder")
+    parser.add_argument("--diseases", default=None, nargs="*", type=str, choices=utils.ALL_DISEASES,
+                        help="Diseases to train with")
+    parser.add_argument("--epochs", default=5, type=int, help="Amount of epochs")
+    parser.add_argument("-bs", "--batch-size", default=4, type=int, help="Batch size")
+    parser.add_argument("-lr", "--learning-rate", default=1e-6, type=float, help="Learning rate")
+    parser.add_argument("--moment", default=0.9, type=float, help="Moment passed to SGD")
+    parser.add_argument("--decay", default=0, type=float, help="Weight decay passed to SGD")
+    parser.add_argument("--reg", default=0, type=float, help="Regularization passed to SGD")
+    parser.add_argument("--resnet", "--train-resnet", default=False, action="store_true",
+                        help="Whether to retrain resnet layers or not")
+    parser.add_argument("--image-format", default="RGB", type=str, help="Image format passed to Pillow")
+    parser.add_argument("--metrics", "--log-metrics", default=None, nargs="*", choices=ALL_METRICS,
+                        help="Metrics logged to TB")
+    parser.add_argument("--flush", "--flush-secs", default=120, type=int, help="Tensorboard flush seconds")
+    parser.add_argument("--train-images", default=None, type=int, help="Max train images")
+    parser.add_argument("--val-images", default=None, type=int, help="Max validation images")
+    parser.add_argument("--non-debug", default=False, action="store_true",
+                        help="If present, is considered an official model")
+    parser.add_argument("--tb-graph", default=False, action="store_true",
+                        help="If present save graph to TB")
+    
+    args = parser.parse_args()
+    
+    is_debug = not args.non_debug
+    if is_debug:
+        args.flush = args.flush or 10
+        args.train_images = args.train_images or 100
+        args.val_images = args.val_images or 100
+        
+    
+    return args
+    
+if __name__ == "__main__":
+    args = parse_args()
+    
+    experiment_mode = "debug"
+    if args.non_debug:
+        experiment_mode = None
+    
+    train_model(base_dir=args.base_dir,
+                chosen_diseases=args.diseases,
+                n_epochs=args.epochs,
+                batch_size=args.batch_size,
+                lr=args.learning_rate,
+                moment=args.moment,
+                decay=args.decay,
+                reg=args.reg,
+                train_resnet=args.resnet,
+                image_format=args.image_format,
+                log_metrics=args.metrics,
+                flush_secs=args.flush,
+                train_max_images=args.train_images,
+                val_max_images=args.val_images,
+                experiment_mode=experiment_mode,
+                write_graph=args.tb_graph,
+               )

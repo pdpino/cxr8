@@ -5,6 +5,10 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 from ignite.metrics import EpochMetric
 
+def get_torch_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
 class RocAucWarning(Warning):
     pass
 

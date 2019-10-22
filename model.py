@@ -3,7 +3,7 @@ import torch.nn as nn
 from torchvision import models
 
 class ResnetBasedModel(nn.Module):
-    def __init__(self, train_resnet=False, n_diseases=14, n_features=2048):
+    def __init__(self, train_resnet=False, n_diseases=14, n_features=2048, transition_conv=False):
         """.
         
         params:
@@ -39,7 +39,11 @@ class ResnetBasedModel(nn.Module):
         x = self.model_ft.layer3(x)
         x = self.model_ft.layer4(x) # n_samples, n_features = 2048, height, width
 
+        # print("Before transition: ", x.size())
+        
         x = self.transition(x)
+        
+        # print("After transition: ", x.size())
         
         pred_weights, pred_bias_unused = list(self.prediction.parameters()) # size: n_diseases, n_features = 2048
         # x: activations from prev layer # size: n_samples, n_features, height = 16, width = 16
