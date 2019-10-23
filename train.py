@@ -25,6 +25,26 @@ ALL_METRICS = ["roc_auc", "prec", "recall", "acc"]
 # warnings.filterwarnings("ignore", category=DeprecationWarning)
 # warnings.filterwarnings("ignore", category=UserWarning)
 
+class ModelRun:
+    def __init__(self, model, run_name, chosen_diseases):
+        self.model = model
+        self.run_name = run_name
+        self.chosen_diseases = chosen_diseases
+        
+        self.writer = None
+        self.train_dataset = None
+        self.train_dataloader = None
+        self.val_dataset = None
+        self.val_dataloader = None
+    
+    def save_debug_data(self, writer, train_dataset, train_dataloader, val_dataset, val_dataloader):
+        self.writer = writer
+        self.train_dataset = train_dataset
+        self.train_dataloader = train_dataloader
+        self.val_dataset = val_dataset
+        self.val_dataloader = val_dataloader
+
+
 
 def get_model_fname(base_dir, run_name, experiment_mode="debug"):
     folder = os.path.join(base_dir, "models")
@@ -74,6 +94,7 @@ def get_step_fn(model, optimizer, device, training=True):
 
     return step_fn
 
+
 def get_transform_one_label(label_index, use_round=True):
     """Creates a transform function to extract one label from a multi-label output."""
     def transform_fn(output):
@@ -117,14 +138,37 @@ def load_model(model_fname):
     learning_rate = checkpoint["hparams"]["lr"]
     optimizer_moment = checkpoint["hparams"]["opt_moment"]
     weight_decay = checkpoint["hparams"]["weight_decay"]
+    chosen_diseases = checkpoint["hparams"]["diseases"].split(",")
+    train_resnet = checkpoint["hparams"]["train_resnet"]
 
-    model = init_empty_model()
+    model = init_empty_model(chosen_diseases, train_resnet)
     optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=optimizer_moment, weight_decay=weight_decay)
 
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    return model, optimizer
+    return model, optimizer, chosen_diseases
+
+
+def prepare_data(dataset_dir, dataset_type, transform_image, chosen_diseases, max_images, image_format, batch_size):
+    print("Loading {} dataset...".format(dataset_type))
+    dataset = CXRDataset(dataset_dir,
+                         dataset_type=dataset_type,
+                         transform=transform_image,
+                         diseases=chosen_diseases,
+                         max_images=max_images,
+                         image_format=image_format)
+    dataloader = DataLoader(dataset, batch_size=batch_size)
+    
+    return dataset, dataloader
+
+
+def get_image_transformation(image_size=512):
+    mean = 0.50576189
+    return transforms.Compose([transforms.Resize(image_size),
+                               transforms.ToTensor(),
+                               transforms.Normalize([mean], [1.])
+                              ])
 
 
 def tb_write_graph(writer, model, dataloader, device):
@@ -133,7 +177,86 @@ def tb_write_graph(writer, model, dataloader, device):
     writer.add_graph(model, images)
 
 
-def train_model(base_dir=".",
+def gen_embeddings(model, dataset, device, image_list=None, image_size=512, n_features=2048):
+    if image_list is None:
+        image_list = list(dataset.label_index["FileName"])
+    
+    select_n_images = len(image_list)
+
+    all_embeddings = torch.Tensor(select_n_images, n_features).to(device)
+    all_images = torch.Tensor(select_n_images, 3, image_size, image_size).to(device)
+    all_predictions = [""] * select_n_images
+    all_ground_truths = [""] * select_n_images
+
+    # HACK: this overrides original transform fn! use only at the end of the dataset life
+    if image_size > 0:
+        dataset.transform = get_image_transformation(image_size)
+    
+    for index, image_name in enumerate(image_list):
+        image, label, _, _, _ = dataset.get_by_name(image_name)
+
+        # Convert to batch
+        images = image.view(1, *image.shape)
+
+        # Image to GPU
+        images = images.to(device)
+
+        # Pass thru model
+        predictions, embeddings, _ = model(images)
+
+        # Copy metadata
+        all_predictions[index] = predictions.cpu().reshape(-1).numpy()
+        all_ground_truths[index] = label
+
+        # Copy embeddings
+        all_embeddings[index] = embeddings
+
+        # Copy images
+        if image_size > 0:
+            all_images[index] = images
+
+        # Has copied index images so far
+        if index + 1 >= select_n_images:
+            break
+            
+    all_predictions = np.array(all_predictions)
+    all_ground_truths = np.array(all_ground_truths)
+    
+    return all_images, all_embeddings, all_predictions, all_ground_truths
+
+
+def tb_write_embeddings(writer, chosen_diseases,
+                        all_images, all_embeddings, all_predictions, all_ground_truths,
+                        use_images=True, global_step=None, tag=""):
+    label_img = all_images if use_images else None
+
+    metadata_header = []
+    for disease in chosen_diseases:
+        metadata_header.append("pred_{}".format(disease))
+        metadata_header.append("round_{}".format(disease))
+        metadata_header.append("gt_{}".format(disease))
+        
+    metadata = []
+    for preds, gts in zip(all_predictions, all_ground_truths):
+        mixed = []
+        for pred, gt in zip(preds, gts):
+            mixed.append("{:.2f}".format(pred))
+            mixed.append(round(pred))
+            mixed.append(gt)
+        metadata.append(mixed)
+
+    writer.add_embedding(all_embeddings,
+                         metadata=metadata,
+                         label_img=label_img,
+                         global_step=global_step,
+                         tag=tag,
+                         metadata_header=metadata_header,
+                        )
+
+
+
+def train_model(name="",
+                base_dir=".",
                 chosen_diseases=None,
                 n_epochs=10,
                 batch_size=4, lr=1e-6, moment=0.9, decay=0, reg=0,
@@ -144,6 +267,8 @@ def train_model(base_dir=".",
                 experiment_mode="debug",
                 save=True,
                 write_graph=False,
+                write_emb=False,
+                write_emb_img=False,
                ):
     
     # Choose GPU
@@ -154,20 +279,24 @@ def train_model(base_dir=".",
     dataset_dir = os.path.join(base_dir, "dataset")
     
     # Transform functions
-    mean = 0.50576189
-    transform_image = transforms.Compose([transforms.Resize(512),
-                                          transforms.ToTensor(),
-                                          transforms.Normalize([mean], [1.])
-                                         ])
+    transform_image = get_image_transformation()
 
     # Dataset handling
-    train_dataset = CXRDataset(dataset_dir, transform=transform_image, diseases=chosen_diseases,
-                               max_images=train_max_images, image_format=image_format)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size)
-    
-    val_dataset = CXRDataset(dataset_dir, dataset_type="val", transform=transform_image,
-                             diseases=chosen_diseases, max_images=val_max_images, image_format=image_format)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size)
+    train_dataset, train_dataloader = prepare_data(dataset_dir,
+                                                   "train",
+                                                   transform_image,
+                                                   chosen_diseases,
+                                                   train_max_images,
+                                                   image_format,
+                                                   batch_size)
+
+    val_dataset, val_dataloader = prepare_data(dataset_dir,
+                                               "val",
+                                               transform_image,
+                                               chosen_diseases,
+                                               val_max_images,
+                                               image_format,
+                                               batch_size)
 
     # Should be the same than chosen_diseases
     chosen_diseases = list(train_dataset.classes)
@@ -266,15 +395,7 @@ def train_model(base_dir=".",
     print("Average time per epoch: ", duration_per_epoch)
     
 
-    ## Write hparams
-    # metrics
-    metric_dict = {}
-    def copy_metrics(engine, engine_name):
-        for metric_name, metric_value in engine.state.metrics.items():
-            metric_dict["{}_{}".format(engine_name, metric_name)] = metric_value
-    copy_metrics(trainer, "train")
-    copy_metrics(validator, "val")
-        
+    ## Write hparams        
     # hparams
     train_samples, _ = train_dataset.size()
     val_samples, _ = val_dataset.size()
@@ -292,8 +413,15 @@ def train_model(base_dir=".",
         "regularization": reg,
         "duration_per_epoch": duration_per_epoch,
     }
+    
+    # metrics
+    def copy_metrics(engine, engine_name):
+        for metric_name, metric_value in engine.state.metrics.items():
+            hparam_dict["{}_{}".format(engine_name, metric_name)] = metric_value
+    copy_metrics(trainer, "train")
+    copy_metrics(validator, "val")
 
-    writer.add_hparams(hparam_dict, metric_dict)
+    writer.add_hparams(hparam_dict, {})
     
     
     # Save model to disk
@@ -303,17 +431,52 @@ def train_model(base_dir=".",
     
     # Write graph to TB
     if write_graph:
+        print("Writing TB graph...")
         tb_write_graph(writer, model, train_dataloader, device)
 
-    # Close TB writer
-    writer.close()
+        
+    if write_emb:
+        print("Writing TB embeddings...")
+        image_size = 256 if write_emb_img else 0
+        
+        # FIXME: be able to select images (balanced, train vs val, etc)
+        image_list = list(train_dataset.label_index["FileName"])[:1000]
+        # disease = chosen_diseases[0]
+        # positive = train_dataset.label_index[train_dataset.label_index[disease] == 1]
+        # negative = train_dataset.label_index[train_dataset.label_index[disease] == 0]
+        # positive_images = list(positive["FileName"])[:25]
+        # negative_images = list(negative["FileName"])[:25]
+        # image_list = positive_images + negative_images
 
-    return model, run_name
+        all_images, all_embeddings, all_predictions, all_ground_truths = gen_embeddings(model,
+                                                                                        train_dataset, 
+                                                                                        device,
+                                                                                        image_list=image_list,
+                                                                                        image_size=image_size)
+        tb_write_embeddings(writer,
+                            chosen_diseases,
+                            all_images, all_embeddings, all_predictions, all_ground_truths,
+                            global_step=n_epochs,
+                            use_images=write_emb_img,
+                            tag="1000_{}".format("img" if write_emb_img else "no_img"),
+                           )
+        
+        
+    # Close TB writer
+    if experiment_mode != "debug":
+        writer.close()
+
+    model_run = ModelRun(model, run_name, chosen_diseases)
+    if experiment_mode == "debug":
+        model_run.save_debug_data(writer, train_dataset, train_dataloader, val_dataset, val_dataloader)
+    
+    return model_run
 
     
 def parse_args():    
     parser = argparse.ArgumentParser(description="Train a model", usage="%(prog)s [options]")
     
+    parser.add_argument("--name", default="", type=str, help="Additional name to the run")
     parser.add_argument("--base-dir", default="/mnt/data/chest-x-ray-8", type=str, help="Base folder")
     parser.add_argument("--diseases", default=None, nargs="*", type=str, choices=utils.ALL_DISEASES,
                         help="Diseases to train with")
@@ -333,8 +496,9 @@ def parse_args():
     parser.add_argument("--val-images", default=None, type=int, help="Max validation images")
     parser.add_argument("--non-debug", default=False, action="store_true",
                         help="If present, is considered an official model")
-    parser.add_argument("--tb-graph", default=False, action="store_true",
-                        help="If present save graph to TB")
+    parser.add_argument("--tb-graph", default=False, action="store_true", help="If present save graph to TB")
+    parser.add_argument("--tb-emb", default=False, action="store_true", help="If present save embedding to TB")
+    parser.add_argument("--tb-emb-img", default=False, action="store_true", help="If present save embedding with images")
     
     args = parser.parse_args()
     
@@ -354,7 +518,8 @@ if __name__ == "__main__":
     if args.non_debug:
         experiment_mode = None
     
-    train_model(base_dir=args.base_dir,
+    train_model(name=args.name,
+                base_dir=args.base_dir,
                 chosen_diseases=args.diseases,
                 n_epochs=args.epochs,
                 batch_size=args.batch_size,
@@ -370,4 +535,6 @@ if __name__ == "__main__":
                 val_max_images=args.val_images,
                 experiment_mode=experiment_mode,
                 write_graph=args.tb_graph,
+                write_emb=args.tb_emb,
+                write_emb_img=args.tb_emb_img,
                )

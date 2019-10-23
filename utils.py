@@ -21,7 +21,7 @@ ALL_DISEASES = [
 DISEASE_INDEX = { name: index for index, name in enumerate(ALL_DISEASES) }
 
 def get_timestamp():
-    return datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d-%H-%M-%S')
+    return datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H-%M-%S')
 
 def duration_to_str(all_seconds):
     seconds = all_seconds % 60
