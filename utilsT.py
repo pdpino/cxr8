@@ -8,7 +8,6 @@ from ignite.metrics import EpochMetric
 def get_torch_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
 class RocAucWarning(Warning):
     pass
 
@@ -24,27 +23,3 @@ def roc_auc_compute_fn(y_preds, y_true):
 
 def RocAucMetric(**kwargs):
     return EpochMetric(roc_auc_compute_fn, **kwargs)
-
-
-def weighted_bce(output, target):
-    """Computes weighted binary cross entropy loss.
-    
-    If a multi-label array is given, the BCE is summed across labels."""
-    output = output.clamp(min=1e-5, max=1-1e-5)
-    target = target.float()
-
-    # Calculate weights
-    BP = 1
-    BN = 1
-
-    total = np.prod(target.size())
-    positive = int((target > 0).sum())
-    negative = total - positive
-
-    if positive != 0 and negative != 0:
-        BP = total / positive
-        BN = total / negative
-
-    loss = -BP * target * torch.log(output) - BN * (1 - target) * torch.log(1 - output)
-
-    return torch.sum(loss)

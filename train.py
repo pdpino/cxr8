@@ -15,6 +15,7 @@ import os
 from dataset import CXRDataset
 from model import ResnetBasedModel
 import utils
+import losses
 import utilsT
 
 
@@ -60,8 +61,10 @@ def get_log_dir(base_dir, run_name, experiment_mode="debug"):
     return os.path.join(folder, run_name)
 
 
-def get_step_fn(model, optimizer, device, training=True):
+def get_step_fn(model, optimizer, device, loss_name, loss_params={}, training=True):
     """Creates a step function for an Engine."""
+    loss_fn = losses.get_loss_function(loss_name, **loss_params)
+    
     def step_fn(engine, data_batch):
         # Input and sizes
         images, labels, names, _, _ = data_batch
@@ -82,7 +85,7 @@ def get_step_fn(model, optimizer, device, training=True):
         outputs, embedding_unused, segments_unused = model(images)
 
         # Compute classification loss
-        loss = utilsT.weighted_bce(outputs, labels)
+        loss = loss_fn(outputs, labels)
 
         batch_loss = loss.item()
 
@@ -133,7 +136,9 @@ def save_model(base_dir, run_name, experiment_mode, hparam_dict, trainer, model,
     }, model_fname)
 
 
-def load_model(model_fname):
+def load_model(base_dir, run_name, experiment_mode=""):
+    model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
+    
     checkpoint = torch.load(model_fname)
     learning_rate = checkpoint["hparams"]["lr"]
     optimizer_moment = checkpoint["hparams"]["opt_moment"]
@@ -150,8 +155,9 @@ def load_model(model_fname):
     return model, optimizer, chosen_diseases
 
 
-def prepare_data(dataset_dir, dataset_type, transform_image, chosen_diseases, max_images, image_format, batch_size):
-    print("Loading {} dataset...".format(dataset_type))
+def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, max_images=None, image_format="RGB"):
+    transform_image = get_image_transformation()
+
     dataset = CXRDataset(dataset_dir,
                          dataset_type=dataset_type,
                          transform=transform_image,
@@ -202,7 +208,8 @@ def gen_embeddings(model, dataset, device, image_list=None, image_size=512, n_fe
         images = images.to(device)
 
         # Pass thru model
-        predictions, embeddings, _ = model(images)
+        with torch.no_grad():
+            predictions, embeddings, _ = model(images)
 
         # Copy metadata
         all_predictions[index] = predictions.cpu().reshape(-1).numpy()
@@ -219,7 +226,9 @@ def gen_embeddings(model, dataset, device, image_list=None, image_size=512, n_fe
         if index + 1 >= select_n_images:
             break
             
+    
     all_predictions = np.array(all_predictions)
+        
     all_ground_truths = np.array(all_ground_truths)
     
     return all_images, all_embeddings, all_predictions, all_ground_truths
@@ -260,15 +269,18 @@ def train_model(name="",
                 chosen_diseases=None,
                 n_epochs=10,
                 batch_size=4, lr=1e-6, moment=0.9, decay=0, reg=0,
+                loss_name="wbce_loss",
+                loss_params={},
                 train_resnet=False,
-                image_format="RGB",
                 log_metrics=None, flush_secs=120,
                 train_max_images=None, val_max_images=None,
                 experiment_mode="debug",
                 save=True,
+                save_cms=True,
                 write_graph=False,
                 write_emb=False,
                 write_emb_img=False,
+                image_format="RGB",
                ):
     
     # Choose GPU
@@ -277,26 +289,24 @@ def train_model(name="",
     
     # Common folders
     dataset_dir = os.path.join(base_dir, "dataset")
-    
-    # Transform functions
-    transform_image = get_image_transformation()
 
     # Dataset handling
+    print("Loading train dataset...")
     train_dataset, train_dataloader = prepare_data(dataset_dir,
                                                    "train",
-                                                   transform_image,
                                                    chosen_diseases,
-                                                   train_max_images,
-                                                   image_format,
-                                                   batch_size)
-
+                                                   batch_size,
+                                                   max_images=train_max_images,
+                                                   image_format=image_format,
+                                                  )
+    print("Loading val dataset...")
     val_dataset, val_dataloader = prepare_data(dataset_dir,
                                                "val",
-                                               transform_image,
                                                chosen_diseases,
-                                               val_max_images,
-                                               image_format,
-                                               batch_size)
+                                               batch_size,
+                                               max_images=val_max_images,
+                                               image_format=image_format,
+                                              )
 
     # Should be the same than chosen_diseases
     chosen_diseases = list(train_dataset.classes)
@@ -306,10 +316,10 @@ def train_model(name="",
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=moment, weight_decay=decay)
     
     # Tensorboard log options
-    loss_name = "wbce_loss"
-
     run_name = utils.get_timestamp()
-    if len(chosen_diseases) == 1:
+    if name:
+        run_name += "_{}".format(name)
+    elif len(chosen_diseases) == 1:
         run_name += "_{}".format(chosen_diseases[0])
     elif len(chosen_diseases) == 14:
         run_name += "_all"
@@ -323,7 +333,7 @@ def train_model(name="",
     
 
     # Create validator engine
-    validator = Engine(get_step_fn(model, optimizer, device, False))
+    validator = Engine(get_step_fn(model, optimizer, device, loss_name, loss_params, False))
 
     val_loss = RunningAverage(output_transform=lambda x: x[0], alpha=1)
     val_loss.attach(validator, loss_name)
@@ -335,7 +345,7 @@ def train_model(name="",
     
     
     # Create trainer engine
-    trainer = Engine(get_step_fn(model, optimizer, device, True))
+    trainer = Engine(get_step_fn(model, optimizer, device, loss_name, loss_params, True))
     
     train_loss = RunningAverage(output_transform=lambda x: x[0], alpha=1)
     train_loss.attach(trainer, loss_name)
@@ -393,7 +403,7 @@ def train_model(name="",
     secs_per_epoch = timer.value()
     duration_per_epoch = utils.duration_to_str(int(secs_per_epoch))
     print("Average time per epoch: ", duration_per_epoch)
-    
+    print("-"*50)
 
     ## Write hparams        
     # hparams
@@ -405,6 +415,8 @@ def train_model(name="",
         "diseases": ",".join(chosen_diseases),
         "n_epochs": n_epochs,
         "batch_size": batch_size,
+        "loss": loss_name,
+        "loss_params": ", ".join("{}:{}".format(k, v) for k, v in loss_params.items()),
         "samples (train, val)": "{},{}".format(train_samples, val_samples),
         "train_resnet": train_resnet,
         "lr": lr,
@@ -414,18 +426,21 @@ def train_model(name="",
         "duration_per_epoch": duration_per_epoch,
     }
     
+    # FIXME: this is commented to avoid having too many hparams in TB frontend
     # metrics
-    def copy_metrics(engine, engine_name):
-        for metric_name, metric_value in engine.state.metrics.items():
-            hparam_dict["{}_{}".format(engine_name, metric_name)] = metric_value
-    copy_metrics(trainer, "train")
-    copy_metrics(validator, "val")
+#     def copy_metrics(engine, engine_name):
+#         for metric_name, metric_value in engine.state.metrics.items():
+#             hparam_dict["{}_{}".format(engine_name, metric_name)] = metric_value
+#     copy_metrics(trainer, "train")
+#     copy_metrics(validator, "val")
 
+    print("Writing TB hparams")
     writer.add_hparams(hparam_dict, {})
     
     
     # Save model to disk
     if save:
+        print("Saving model...")
         save_model(base_dir, run_name, experiment_mode, hparam_dict, trainer, model, optimizer)
     
     
@@ -434,7 +449,8 @@ def train_model(name="",
         print("Writing TB graph...")
         tb_write_graph(writer, model, train_dataloader, device)
 
-        
+
+    # Write embeddings to TB
     if write_emb:
         print("Writing TB embeddings...")
         image_size = 256 if write_emb_img else 0
@@ -466,6 +482,37 @@ def train_model(name="",
     if experiment_mode != "debug":
         writer.close()
 
+        
+    # Save confusion matrices (is expensive to calculate them afterwards)
+    if save_cms:
+        print("Saving confusion matrices...")
+        # Assure folder
+        cms_dir = os.path.join(base_dir, "cms", experiment_mode)
+        os.makedirs(cms_dir, exist_ok=True)
+        base_fname = os.path.join(cms_dir, run_name)
+        
+        n_diseases = len(chosen_diseases)
+
+        # Train confusion matrix
+        n_train_images = train_dataset.size()[0]
+        all_results_train = utils.predict_all(model, train_dataloader, device, n_train_images, n_diseases)
+        
+        train_cms = utils.calculate_all_cms(*all_results_train)
+        np.save(base_fname + "_train", train_cms)
+        
+        # Validation confusion matrix
+        n_val_images = val_dataset.size()[0]
+        all_results_val = utils.predict_all(model, val_dataloader, device, n_val_images, n_diseases)
+        
+        val_cms = utils.calculate_all_cms(*all_results_val)
+        np.save(base_fname + "_val", val_cms)
+        
+        # All confusion matrix
+        all_cms = train_cms + val_cms
+        np.save(base_fname + "_all", all_cms)
+        
+        
+    # Return values for debugging
     model_run = ModelRun(model, run_name, chosen_diseases)
     if experiment_mode == "debug":
         model_run.save_debug_data(writer, train_dataset, train_dataloader, val_dataset, val_dataloader)
@@ -473,13 +520,14 @@ def train_model(name="",
     return model_run
 
     
-def parse_args():    
+def parse_args():
     parser = argparse.ArgumentParser(description="Train a model", usage="%(prog)s [options]")
     
     parser.add_argument("--name", default="", type=str, help="Additional name to the run")
     parser.add_argument("--base-dir", default="/mnt/data/chest-x-ray-8", type=str, help="Base folder")
     parser.add_argument("--diseases", default=None, nargs="*", type=str, choices=utils.ALL_DISEASES,
                         help="Diseases to train with")
+    parser.add_argument("--n-diseases", default=None, type=int, help="If present, select the first n diseases")
     parser.add_argument("--epochs", default=5, type=int, help="Amount of epochs")
     parser.add_argument("-bs", "--batch-size", default=4, type=int, help="Batch size")
     parser.add_argument("-lr", "--learning-rate", default=1e-6, type=float, help="Learning rate")
@@ -500,14 +548,33 @@ def parse_args():
     parser.add_argument("--tb-emb", default=False, action="store_true", help="If present save embedding to TB")
     parser.add_argument("--tb-emb-img", default=False, action="store_true", help="If present save embedding with images")
     
+    loss_group = parser.add_argument_group(title="Losses options")
+    loss_group.add_argument("--loss", default="wbce_loss", type=str, choices=losses.AVAILABLE_LOSSES,
+                            help="Loss function used")
+    loss_group.add_argument("--focal-alpha", default=0.75, type=float, help="Alpha passed to focal loss")
+    loss_group.add_argument("--focal-gamma", default=2, type=float, help="Gamma passed to focal loss")
+    
     args = parser.parse_args()
     
+    # If debugging, automatically set other values
     is_debug = not args.non_debug
     if is_debug:
         args.flush = args.flush or 10
         args.train_images = args.train_images or 100
         args.val_images = args.val_images or 100
         
+    # Prepare loss_params
+    if args.loss == "focal_loss":
+        args.loss_params = {
+            "alpha": args.focal_alpha,
+            "gamma": args.focal_gamma,
+        }
+    else:
+        args.loss_params = {}
+
+    # Shorthand for first diseases
+    if args.n_diseases and args.n_diseases > 0:
+        args.diseases = utils.ALL_DISEASES[:args.n_diseases]
     
     return args
     
@@ -517,7 +584,9 @@ if __name__ == "__main__":
     experiment_mode = "debug"
     if args.non_debug:
         experiment_mode = None
-    
+
+    start_time = time.time()
+
     train_model(name=args.name,
                 base_dir=args.base_dir,
                 chosen_diseases=args.diseases,
@@ -527,8 +596,9 @@ if __name__ == "__main__":
                 moment=args.moment,
                 decay=args.decay,
                 reg=args.reg,
+                loss_name=args.loss,
+                loss_params=args.loss_params,
                 train_resnet=args.resnet,
-                image_format=args.image_format,
                 log_metrics=args.metrics,
                 flush_secs=args.flush,
                 train_max_images=args.train_images,
@@ -537,4 +607,9 @@ if __name__ == "__main__":
                 write_graph=args.tb_graph,
                 write_emb=args.tb_emb,
                 write_emb_img=args.tb_emb_img,
+                image_format=args.image_format,
                )
+    end_time = time.time()
+    
+    print("-"*50)
+    print("Total training time: ", utils.duration_to_str(end_time - start_time))
