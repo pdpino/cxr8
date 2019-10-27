@@ -5,6 +5,7 @@ from torchvision.transforms import functional as F
 import pandas as pd
 import numpy as np
 from PIL import Image
+from filelock import FileLock
 import os
 import random
 
@@ -87,9 +88,11 @@ class CXRDataset(Dataset):
     def __getitem__(self, idx):
         image_name, labels, bboxes, bbox_valid = self.precomputed[idx]
         
-        # Load the image
+        # Load the image with a lock
         image_fname = os.path.join(self.image_dir, image_name)
-        image = Image.open(image_fname).convert(self.image_format)
+        with FileLock(image_fname + ".lock"):
+            image = Image.open(image_fname).convert(self.image_format)
+
         if self.transform:
             image = self.transform(image)
         
