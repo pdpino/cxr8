@@ -11,6 +11,7 @@ import numpy as np
 import argparse
 import time
 import os
+import warnings
 
 from dataset import CXRDataset
 from model import ResnetBasedModel
@@ -69,7 +70,7 @@ def get_step_fn(model, optimizer, device, loss_name, loss_params={}, training=Tr
         # Input and sizes
         images, labels, names, _, _ = data_batch
         n_samples, n_labels = labels.size()
-
+        
         # Move tensors to GPU
         images = images.to(device)
         labels = labels.to(device)
@@ -84,9 +85,17 @@ def get_step_fn(model, optimizer, device, loss_name, loss_params={}, training=Tr
         # Forward, receive outputs from the model and segments (bboxes)
         outputs, embedding_unused, segments_unused = model(images)
 
+#         if bool(torch.isnan(outputs).any().item()):
+#             warnings.warn("Nans found in prediction")
+#             outputs[outputs != outputs] = 0 # Set NaNs to 0
+        
         # Compute classification loss
         loss = loss_fn(outputs, labels)
 
+#         if bool(torch.isnan(loss).any().item()):
+#             warnings.warn("Nans found in loss: {}".format(loss))
+#             loss[loss != loss] = 0
+        
         batch_loss = loss.item()
 
         if training:
@@ -140,14 +149,20 @@ def load_model(base_dir, run_name, experiment_mode=""):
     model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
     
     checkpoint = torch.load(model_fname)
-    learning_rate = checkpoint["hparams"]["lr"]
-    optimizer_moment = checkpoint["hparams"]["opt_moment"]
-    weight_decay = checkpoint["hparams"]["weight_decay"]
     chosen_diseases = checkpoint["hparams"]["diseases"].split(",")
     train_resnet = checkpoint["hparams"]["train_resnet"]
+    
+    def get_opt_params():
+        params = {}
+        for key, value in checkpoint.items():
+            if key.startswith("opt_"):
+                key = key[4:]
+                params[key] = value
+    
+    opt_params = get_opt_params()
 
     model = init_empty_model(chosen_diseases, train_resnet)
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=optimizer_moment, weight_decay=weight_decay)
+    optimizer = optim.SGD(model.parameters(), **opt_params)
 
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -178,6 +193,7 @@ def get_image_transformation(image_size=512):
 
 
 def tb_write_graph(writer, model, dataloader, device):
+    # FIXME: Showing this error: https://github.com/lanpa/tensorboardX/issues/483
     images = next(iter(dataloader))[0]
     images = images.to(device)
     writer.add_graph(model, images)
@@ -268,7 +284,8 @@ def train_model(name="",
                 base_dir=".",
                 chosen_diseases=None,
                 n_epochs=10,
-                batch_size=4, lr=1e-6, moment=0.9, decay=0, reg=0,
+                batch_size=4,
+                opt_params={},
                 loss_name="wbce_loss",
                 loss_params={},
                 train_resnet=False,
@@ -313,13 +330,14 @@ def train_model(name="",
     
     # Create model and optim
     model = init_empty_model(chosen_diseases, train_resnet=train_resnet).to(device)
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=moment, weight_decay=decay)
+    optimizer = optim.SGD(model.parameters(), **opt_params)
     
     # Tensorboard log options
     run_name = utils.get_timestamp()
     if name:
         run_name += "_{}".format(name)
-    elif len(chosen_diseases) == 1:
+
+    if len(chosen_diseases) == 1:
         run_name += "_{}".format(chosen_diseases[0])
     elif len(chosen_diseases) == 14:
         run_name += "_all"
@@ -415,16 +433,19 @@ def train_model(name="",
         "diseases": ",".join(chosen_diseases),
         "n_epochs": n_epochs,
         "batch_size": batch_size,
+        "opt": "sgd", # TODO: add new optimizers if available
         "loss": loss_name,
-        "loss_params": ", ".join("{}:{}".format(k, v) for k, v in loss_params.items()),
         "samples (train, val)": "{},{}".format(train_samples, val_samples),
         "train_resnet": train_resnet,
-        "lr": lr,
-        "opt_moment": moment,
-        "weight_decay": decay,
-        "regularization": reg,
         "duration_per_epoch": duration_per_epoch,
     }
+    def copy_params(params_dict, base_name):
+        for name, value in params_dict.items():
+            hparam_dict["{}_{}".format(base_name, name)] = value
+    
+    copy_params(loss_params, "loss")
+    copy_params(opt_params, "opt")
+
     
     # FIXME: this is commented to avoid having too many hparams in TB frontend
     # metrics
@@ -530,10 +551,6 @@ def parse_args():
     parser.add_argument("--n-diseases", default=None, type=int, help="If present, select the first n diseases")
     parser.add_argument("--epochs", default=5, type=int, help="Amount of epochs")
     parser.add_argument("-bs", "--batch-size", default=4, type=int, help="Batch size")
-    parser.add_argument("-lr", "--learning-rate", default=1e-6, type=float, help="Learning rate")
-    parser.add_argument("--moment", default=0.9, type=float, help="Moment passed to SGD")
-    parser.add_argument("--decay", default=0, type=float, help="Weight decay passed to SGD")
-    parser.add_argument("--reg", default=0, type=float, help="Regularization passed to SGD")
     parser.add_argument("--resnet", "--train-resnet", default=False, action="store_true",
                         help="Whether to retrain resnet layers or not")
     parser.add_argument("--image-format", default="RGB", type=str, help="Image format passed to Pillow")
@@ -554,12 +571,18 @@ def parse_args():
     loss_group.add_argument("--focal-alpha", default=0.75, type=float, help="Alpha passed to focal loss")
     loss_group.add_argument("--focal-gamma", default=2, type=float, help="Gamma passed to focal loss")
     
+    optim_group = parser.add_argument_group(title="Optimizer options")
+    optim_group.add_argument("-lr", "--learning-rate", default=1e-6, type=float, help="Learning rate")
+    optim_group.add_argument("-mom", "--momentum", default=0.9, type=float, help="Momentum passed to SGD")
+    optim_group.add_argument("-wd", "--weight-decay", default=0, type=float, help="Weight decay passed to SGD")
+
+    
     args = parser.parse_args()
     
     # If debugging, automatically set other values
     is_debug = not args.non_debug
     if is_debug:
-        args.flush = args.flush or 10
+        args.flush = 10
         args.train_images = args.train_images or 100
         args.val_images = args.val_images or 100
         
@@ -571,6 +594,14 @@ def parse_args():
         }
     else:
         args.loss_params = {}
+        
+    # Prepare optim_params
+    if True: # args.opt == "sgd":
+        args.opt_params = {
+            "lr": args.learning_rate,
+            "momentum": args.momentum,
+            "weight_decay": args.weight_decay,
+        }
 
     # Shorthand for first diseases
     if args.n_diseases and args.n_diseases > 0:
@@ -583,33 +614,31 @@ if __name__ == "__main__":
     
     experiment_mode = "debug"
     if args.non_debug:
-        experiment_mode = None
+        experiment_mode = ""
 
     start_time = time.time()
 
-    train_model(name=args.name,
-                base_dir=args.base_dir,
-                chosen_diseases=args.diseases,
-                n_epochs=args.epochs,
-                batch_size=args.batch_size,
-                lr=args.learning_rate,
-                moment=args.moment,
-                decay=args.decay,
-                reg=args.reg,
-                loss_name=args.loss,
-                loss_params=args.loss_params,
-                train_resnet=args.resnet,
-                log_metrics=args.metrics,
-                flush_secs=args.flush,
-                train_max_images=args.train_images,
-                val_max_images=args.val_images,
-                experiment_mode=experiment_mode,
-                write_graph=args.tb_graph,
-                write_emb=args.tb_emb,
-                write_emb_img=args.tb_emb_img,
-                image_format=args.image_format,
-               )
+    run = train_model(name=args.name,
+                      base_dir=args.base_dir,
+                      chosen_diseases=args.diseases,
+                      n_epochs=args.epochs,
+                      batch_size=args.batch_size,
+                      opt_params=args.opt_params,
+                      loss_name=args.loss,
+                      loss_params=args.loss_params,
+                      train_resnet=args.resnet,
+                      log_metrics=args.metrics,
+                      flush_secs=args.flush,
+                      train_max_images=args.train_images,
+                      val_max_images=args.val_images,
+                      experiment_mode=experiment_mode,
+                      write_graph=args.tb_graph,
+                      write_emb=args.tb_emb,
+                      write_emb_img=args.tb_emb_img,
+                      image_format=args.image_format,
+                     )
     end_time = time.time()
     
     print("-"*50)
     print("Total training time: ", utils.duration_to_str(end_time - start_time))
+    print("Run name: ", run.run_name)

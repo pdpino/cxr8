@@ -40,7 +40,7 @@ class ResnetBasedModel(nn.Module):
         x = self.model_ft.layer4(x) # n_samples, n_features = 2048, height, width
 
         # print("Before transition: ", x.size())
-        
+
         x = self.transition(x)
         
         # print("After transition: ", x.size())
@@ -53,6 +53,7 @@ class ResnetBasedModel(nn.Module):
         # REVIEW: is this multiplication correct?
         
         x = self.global_pool(x)
+
         x = x.view(x.size(0), -1)
         
         embedding = x
