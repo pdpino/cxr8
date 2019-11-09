@@ -52,9 +52,17 @@ class ResnetBasedModel(nn.Module):
         activations = torch.matmul(pred_weights, x.transpose(1, 2)).transpose(1, 2)
         # REVIEW: is this multiplication correct?
         
+        # print("\tweights: ", pred_weights.size())
+        # print("\tTransposed 0,1: ", x.transpose(0, 1).size())
+        # print("\tTransposed 1,2: ", x.transpose(1, 2).size())
+        
         x = self.global_pool(x)
+        
+        # print("After global pool: ", x.size())
 
         x = x.view(x.size(0), -1)
+        
+        # print("After view: ", x.size())
         
         embedding = x
         
@@ -62,3 +70,6 @@ class ResnetBasedModel(nn.Module):
         
         return x, embedding, activations
 
+    def ignore_param(self, name):
+        """Whether or not should ignore a parameter with a certain name."""
+        return "model_ft.fc." in name if name else True

@@ -1,11 +1,12 @@
 import torch
-import torch.optim as optim
+# import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tensorboardX import SummaryWriter
 from ignite.engine import Engine, Events
-from ignite.metrics import Accuracy, Precision, Recall, RunningAverage #, EpochMetric
+from ignite.metrics import Accuracy, Precision, Recall, RunningAverage, ConfusionMatrix, VariableAccumulation #, EpochMetric
 from ignite.handlers import Timer
+from ignite.utils import to_onehot
 
 import numpy as np
 import argparse
@@ -17,15 +18,12 @@ from dataset import CXRDataset
 from model import ResnetBasedModel
 import utils
 import losses
+import optimizers
 import utilsT
 
 
 ALL_METRICS = ["roc_auc", "prec", "recall", "acc"]
 
-# FIXME: fix deprecations # OUTDATED??
-# import warnings
-# warnings.filterwarnings("ignore", category=DeprecationWarning)
-# warnings.filterwarnings("ignore", category=UserWarning)
 
 class ModelRun:
     def __init__(self, model, run_name, chosen_diseases):
@@ -34,13 +32,17 @@ class ModelRun:
         self.chosen_diseases = chosen_diseases
         
         self.writer = None
+        self.trainer = None
+        self.validator = None
         self.train_dataset = None
         self.train_dataloader = None
         self.val_dataset = None
         self.val_dataloader = None
     
-    def save_debug_data(self, writer, train_dataset, train_dataloader, val_dataset, val_dataloader):
+    def save_debug_data(self, writer, trainer, validator, train_dataset, train_dataloader, val_dataset, val_dataloader):
         self.writer = writer
+        self.trainer = trainer
+        self.validator = validator
         self.train_dataset = train_dataset
         self.train_dataloader = train_dataloader
         self.val_dataset = val_dataset
@@ -122,12 +124,43 @@ def get_transform_one_label(label_index, use_round=True):
     return transform_fn
 
 
-def attach_metrics(engine, chosen_diseases, metric_name, MetricClass, use_round):
+def get_transform_cm(label_index, num_classes=2):
+    """Creates a transform function to prepare the input for the ConfusionMatrix metric."""
+    def transform_fn(output):
+        _, y_pred, y_true = output
+        
+        # print("ORIGINAL: ", torch.round(y_pred[:, label_index]).long())
+        y_pred = to_onehot(torch.round(y_pred[:, label_index]).long(), num_classes)
+        y_true = y_true[:, label_index]
+        
+        # print("TO: ", y_pred)
+
+        return y_pred, y_true
+    
+    return transform_fn
+
+
+def get_count_positives(label_index):
+    def count_positives_fn(result):
+        """Count positive examples in a batch (for a given disease index)."""
+        _, _, labels = result
+        return torch.sum(labels[:, label_index]).item()
+
+    return count_positives_fn
+
+
+def attach_metrics(engine, chosen_diseases, metric_name, MetricClass,
+                   use_round=True,
+                   get_transform_fn=None,
+                   metric_args=()):
     """Attaches one metric per label to an engine."""
     for index, disease in enumerate(chosen_diseases):
-        transform_disease = get_transform_one_label(index, use_round=use_round)
+        if get_transform_fn:
+            transform_disease = get_transform_fn(index)
+        else:
+            transform_disease = get_transform_one_label(index, use_round=use_round)
 
-        metric = MetricClass(output_transform=transform_disease)
+        metric = MetricClass(*metric_args, output_transform=transform_disease)
         metric.attach(engine, "{}_{}".format(metric_name, disease))
 
 
@@ -145,24 +178,33 @@ def save_model(base_dir, run_name, experiment_mode, hparam_dict, trainer, model,
     }, model_fname)
 
 
-def load_model(base_dir, run_name, experiment_mode=""):
+def load_model(base_dir, run_name, experiment_mode="", device=None):
     model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
     
     checkpoint = torch.load(model_fname)
-    chosen_diseases = checkpoint["hparams"]["diseases"].split(",")
-    train_resnet = checkpoint["hparams"]["train_resnet"]
+    hparams = checkpoint["hparams"]
+    chosen_diseases = hparams["diseases"].split(",")
+    train_resnet = hparams["train_resnet"]
     
     def get_opt_params():
         params = {}
-        for key, value in checkpoint.items():
+        for key, value in hparams.items():
             if key.startswith("opt_"):
                 key = key[4:]
                 params[key] = value
+        return params
     
     opt_params = get_opt_params()
 
+    # Load model
     model = init_empty_model(chosen_diseases, train_resnet)
-    optimizer = optim.SGD(model.parameters(), **opt_params)
+    if device:
+        model = model.to(device)
+    
+    # Load optimizer
+    opt = hparams["opt"]
+    OptClass = optimizers.get_optimizer_class(opt)
+    optimizer = OptClass(model.parameters(), **opt_params)
 
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -170,7 +212,7 @@ def load_model(base_dir, run_name, experiment_mode=""):
     return model, optimizer, chosen_diseases
 
 
-def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, max_images=None, image_format="RGB"):
+def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, shuffle=False, max_images=None, image_format="RGB"):
     transform_image = get_image_transformation()
 
     dataset = CXRDataset(dataset_dir,
@@ -179,7 +221,7 @@ def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, max_ima
                          diseases=chosen_diseases,
                          max_images=max_images,
                          image_format=image_format)
-    dataloader = DataLoader(dataset, batch_size=batch_size)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
     
     return dataset, dataloader
 
@@ -278,22 +320,39 @@ def tb_write_embeddings(writer, chosen_diseases,
                          metadata_header=metadata_header,
                         )
 
+def tb_write_cms(writer, dataset_type, diseases, cms):
+    for cm, disease in zip(cms, diseases):
+        writer.add_text("cm_" + disease + "/" + dataset_type, str(cm))
+
+
+def tb_write_histogram(writer, model, epoch, wall_time):
+#     accept_all = lambda x: True
+#     ignore_fn = getattr(model, "ignore_param", accept_all)
+
+    for name, params in model.named_parameters():
+#         if ignore_fn(name):
+#             continue
+
+        writer.add_histogram(name, params.cpu().detach().numpy(), global_step=epoch, walltime=wall_time)
 
 
 def train_model(name="",
+                resume="",
                 base_dir=".",
                 chosen_diseases=None,
                 n_epochs=10,
                 batch_size=4,
+                shuffle=False,
+                opt="sgd",
                 opt_params={},
-                loss_name="wbce_loss",
+                loss_name="wbce",
                 loss_params={},
                 train_resnet=False,
                 log_metrics=None, flush_secs=120,
                 train_max_images=None, val_max_images=None,
                 experiment_mode="debug",
                 save=True,
-                save_cms=True,
+                save_cms=True, # Note that in this case, save_cms (to disk) includes write_cms (to TB)
                 write_graph=False,
                 write_emb=False,
                 write_emb_img=False,
@@ -313,9 +372,12 @@ def train_model(name="",
                                                    "train",
                                                    chosen_diseases,
                                                    batch_size,
+                                                   shuffle=shuffle,
                                                    max_images=train_max_images,
                                                    image_format=image_format,
                                                   )
+    train_samples, _ = train_dataset.size()
+
     print("Loading val dataset...")
     val_dataset, val_dataloader = prepare_data(dataset_dir,
                                                "val",
@@ -324,13 +386,25 @@ def train_model(name="",
                                                max_images=val_max_images,
                                                image_format=image_format,
                                               )
-
+    val_samples, _ = val_dataset.size()
+    
     # Should be the same than chosen_diseases
     chosen_diseases = list(train_dataset.classes)
+    print("Chosen diseases: ", chosen_diseases)
+
     
-    # Create model and optim
-    model = init_empty_model(chosen_diseases, train_resnet=train_resnet).to(device)
-    optimizer = optim.SGD(model.parameters(), **opt_params)
+    if resume:
+        # Load model and optimizer
+        model, optimizer, chosen_diseases = load_model(base_dir, resume, experiment_mode="", device=device)
+        model.train(True)
+    else:
+        # Create model
+        model = init_empty_model(chosen_diseases, train_resnet=train_resnet).to(device)
+
+        # Create optimizer
+        OptClass = optimizers.get_optimizer_class(opt)
+        optimizer = OptClass(model.parameters(), **opt_params)
+        # print("OPT: ", opt_params)
     
     # Tensorboard log options
     run_name = utils.get_timestamp()
@@ -360,7 +434,9 @@ def train_model(name="",
     attach_metrics(validator, chosen_diseases, "recall", Recall, True)
     attach_metrics(validator, chosen_diseases, "acc", Accuracy, True)
     attach_metrics(validator, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
-    
+    attach_metrics(validator, chosen_diseases, "cm", ConfusionMatrix, get_transform_fn=get_transform_cm, metric_args=(2,))
+    attach_metrics(validator, chosen_diseases, "positives", RunningAverage, get_transform_fn=get_count_positives)
+
     
     # Create trainer engine
     trainer = Engine(get_step_fn(model, optimizer, device, loss_name, loss_params, True))
@@ -372,7 +448,10 @@ def train_model(name="",
     attach_metrics(trainer, chosen_diseases, "prec", Precision, True)
     attach_metrics(trainer, chosen_diseases, "recall", Recall, True)
     attach_metrics(trainer, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
+    attach_metrics(trainer, chosen_diseases, "cm", ConfusionMatrix, get_transform_fn=get_transform_cm, metric_args=(2,))
+    attach_metrics(trainer, chosen_diseases, "positives", RunningAverage, get_transform_fn=get_count_positives)
     
+
     timer = Timer(average=True)
     timer.attach(trainer, start=Events.EPOCH_STARTED, step=Events.EPOCH_COMPLETED)
 
@@ -409,7 +488,33 @@ def train_model(name="",
         train_loss = trainer.state.metrics.get(loss_name, 0)
         val_loss = validator.state.metrics.get(loss_name, 0)
 
+        tb_write_histogram(writer, model, epoch, wall_time)
+        
         print("Finished epoch {}/{}, loss {} (val {})".format(epoch, max_epochs, train_loss, val_loss))
+
+        
+    # Hparam dict
+    hparam_dict = {
+        "resume": resume,
+        "n_diseases": len(chosen_diseases),
+        "diseases": ",".join(chosen_diseases),
+        "n_epochs": n_epochs,
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "opt": opt,
+        "loss": loss_name,
+        "samples (train, val)": "{},{}".format(train_samples, val_samples),
+        "train_resnet": train_resnet,
+    }
+    
+    def copy_params(params_dict, base_name):
+        for name, value in params_dict.items():
+            hparam_dict["{}_{}".format(base_name, name)] = value
+    
+    copy_params(loss_params, "loss")
+    copy_params(opt_params, "opt")
+    print("HPARAM: ", hparam_dict)
+
 
     # Train
     print("-" * 50)
@@ -423,28 +528,8 @@ def train_model(name="",
     print("Average time per epoch: ", duration_per_epoch)
     print("-"*50)
 
-    ## Write hparams        
-    # hparams
-    train_samples, _ = train_dataset.size()
-    val_samples, _ = val_dataset.size()
-
-    hparam_dict = {
-        "n_diseases": len(chosen_diseases),
-        "diseases": ",".join(chosen_diseases),
-        "n_epochs": n_epochs,
-        "batch_size": batch_size,
-        "opt": "sgd", # TODO: add new optimizers if available
-        "loss": loss_name,
-        "samples (train, val)": "{},{}".format(train_samples, val_samples),
-        "train_resnet": train_resnet,
-        "duration_per_epoch": duration_per_epoch,
-    }
-    def copy_params(params_dict, base_name):
-        for name, value in params_dict.items():
-            hparam_dict["{}_{}".format(base_name, name)] = value
-    
-    copy_params(loss_params, "loss")
-    copy_params(opt_params, "opt")
+    ## Write all hparams
+    hparam_dict["duration_per_epoch"] = duration_per_epoch
 
     
     # FIXME: this is commented to avoid having too many hparams in TB frontend
@@ -498,14 +583,11 @@ def train_model(name="",
                             tag="1000_{}".format("img" if write_emb_img else "no_img"),
                            )
         
-        
-    # Close TB writer
-    if experiment_mode != "debug":
-        writer.close()
-
-        
     # Save confusion matrices (is expensive to calculate them afterwards)
     if save_cms:
+        # REVIEW: delete this?
+        # now is calculated with the ConfusionMatrix metric from ignite
+
         print("Saving confusion matrices...")
         # Assure folder
         cms_dir = os.path.join(base_dir, "cms", experiment_mode)
@@ -514,29 +596,62 @@ def train_model(name="",
         
         n_diseases = len(chosen_diseases)
 
-        # Train confusion matrix
-        n_train_images = train_dataset.size()[0]
-        all_results_train = utils.predict_all(model, train_dataloader, device, n_train_images, n_diseases)
+        def extract_cms(metrics):
+            """Extract confusion matrices from a metrics dict."""
+            cms = []
+            for disease in chosen_diseases:
+                key = "cm_" + disease
+                if key not in metrics:
+                    cm = np.array([[-1, -1], [-1, -1]])
+                else:
+                    cm = metrics[key].numpy()
+                    
+                cms.append(cm)
+            return np.array(cms)
         
-        train_cms = utils.calculate_all_cms(*all_results_train)
+        # Train confusion matrix
+        # n_train_images = train_dataset.size()[0]
+        # all_results_train = utils.predict_all(model, train_dataloader, device, n_train_images, n_diseases)
+        # train_cms = utils.calculate_all_cms(*all_results_train)
+        train_cms = extract_cms(trainer.state.metrics)
+
         np.save(base_fname + "_train", train_cms)
+        tb_write_cms(writer, "train", chosen_diseases, train_cms)
         
         # Validation confusion matrix
-        n_val_images = val_dataset.size()[0]
-        all_results_val = utils.predict_all(model, val_dataloader, device, n_val_images, n_diseases)
-        
-        val_cms = utils.calculate_all_cms(*all_results_val)
+        # n_val_images = val_dataset.size()[0]
+        # all_results_val = utils.predict_all(model, val_dataloader, device, n_val_images, n_diseases)
+        # val_cms = utils.calculate_all_cms(*all_results_val)
+        val_cms = extract_cms(validator.state.metrics)
+
         np.save(base_fname + "_val", val_cms)
+        tb_write_cms(writer, "val", chosen_diseases, val_cms)
         
         # All confusion matrix
         all_cms = train_cms + val_cms
         np.save(base_fname + "_all", all_cms)
         
+        # Print to console
+        if len(chosen_diseases) == 1:
+            print("Train CM: ")
+            print(train_cms[0])
+            print("Val CM: ")
+            print(val_cms[0])
+            
+#             print("Train CM 2: ")
+#             print(trainer.state.metrics["cm_" + chosen_diseases[0]])
+#             print("Val CM 2: ")
+#             print(validator.state.metrics["cm_" + chosen_diseases[0]])
         
+    # Close TB writer
+    if experiment_mode != "debug":
+        writer.close()
+
+
     # Return values for debugging
     model_run = ModelRun(model, run_name, chosen_diseases)
     if experiment_mode == "debug":
-        model_run.save_debug_data(writer, train_dataset, train_dataloader, val_dataset, val_dataloader)
+        model_run.save_debug_data(writer, trainer, validator, train_dataset, train_dataloader, val_dataset, val_dataloader)
     
     return model_run
 
@@ -545,12 +660,15 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train a model", usage="%(prog)s [options]")
     
     parser.add_argument("--name", default="", type=str, help="Additional name to the run")
+    parser.add_argument("--resume", default="", type=str, help="If present, resume from another run")
     parser.add_argument("--base-dir", default="/mnt/data/chest-x-ray-8", type=str, help="Base folder")
     parser.add_argument("--diseases", default=None, nargs="*", type=str, choices=utils.ALL_DISEASES,
                         help="Diseases to train with")
     parser.add_argument("--n-diseases", default=None, type=int, help="If present, select the first n diseases")
     parser.add_argument("--epochs", default=5, type=int, help="Amount of epochs")
     parser.add_argument("-bs", "--batch-size", default=4, type=int, help="Batch size")
+    parser.add_argument("--shuffle", default=False, action="store_true",
+                        help="If present, shuffles the train data at every epoch")
     parser.add_argument("--resnet", "--train-resnet", default=False, action="store_true",
                         help="Whether to retrain resnet layers or not")
     parser.add_argument("--image-format", default="RGB", type=str, help="Image format passed to Pillow")
@@ -566,15 +684,17 @@ def parse_args():
     parser.add_argument("--tb-emb-img", default=False, action="store_true", help="If present save embedding with images")
     
     loss_group = parser.add_argument_group(title="Losses options")
-    loss_group.add_argument("--loss", default="wbce_loss", type=str, choices=losses.AVAILABLE_LOSSES,
+    loss_group.add_argument("--loss", default="wbce", type=str, choices=losses.AVAILABLE_LOSSES,
                             help="Loss function used")
     loss_group.add_argument("--focal-alpha", default=0.75, type=float, help="Alpha passed to focal loss")
     loss_group.add_argument("--focal-gamma", default=2, type=float, help="Gamma passed to focal loss")
     
     optim_group = parser.add_argument_group(title="Optimizer options")
+    optim_group.add_argument("--opt", default="sgd", type=str, choices=optimizers.AVAILABLE_OPTIMIZERS,
+                             help="Choose an optimizer")
     optim_group.add_argument("-lr", "--learning-rate", default=1e-6, type=float, help="Learning rate")
     optim_group.add_argument("-mom", "--momentum", default=0.9, type=float, help="Momentum passed to SGD")
-    optim_group.add_argument("-wd", "--weight-decay", default=0, type=float, help="Weight decay passed to SGD")
+    optim_group.add_argument("-wd", "--weight-decay", default=0, type=float, help="Weight decay passed to SGD/Adam")
 
     
     args = parser.parse_args()
@@ -596,10 +716,15 @@ def parse_args():
         args.loss_params = {}
         
     # Prepare optim_params
-    if True: # args.opt == "sgd":
+    if args.opt == "sgd":
         args.opt_params = {
             "lr": args.learning_rate,
             "momentum": args.momentum,
+            "weight_decay": args.weight_decay,
+        }
+    elif args.opt == "adam":
+        args.opt_params = {
+            "lr": args.learning_rate,
             "weight_decay": args.weight_decay,
         }
 
@@ -619,10 +744,13 @@ if __name__ == "__main__":
     start_time = time.time()
 
     run = train_model(name=args.name,
+                      resume=args.resume,
                       base_dir=args.base_dir,
                       chosen_diseases=args.diseases,
                       n_epochs=args.epochs,
                       batch_size=args.batch_size,
+                      shuffle=args.shuffle,
+                      opt=args.opt,
                       opt_params=args.opt_params,
                       loss_name=args.loss,
                       loss_params=args.loss_params,
@@ -642,3 +770,4 @@ if __name__ == "__main__":
     print("-"*50)
     print("Total training time: ", utils.duration_to_str(end_time - start_time))
     print("Run name: ", run.run_name)
+    print("="*50)

@@ -97,7 +97,7 @@ def calculate_all_cms(all_predictions, all_ground_truths):
     return np.array(all_cms)
 
 
-def plot_cm(cm, classes, title):
+def plot_cm(cm, classes, title, percentage=False):
     n_classes = len(classes)
     ticks = np.arange(n_classes)
 
@@ -110,21 +110,52 @@ def plot_cm(cm, classes, title):
     plt.xlabel("Prediction")
     plt.ylabel("True")
 
+    total = cm.sum()
+    
     thresh = cm.max() / 2
     for row in range(n_classes):
         for col in range(n_classes):
             value = cm[row, col]
             color = "white" if value > thresh else "black"
-            plt.text(col, row, "{:d}".format(value), ha="center", va="center", color=color)
+            
+            value_str = "{:d}".format(int(value))
+            if percentage:
+                value_str += "\n({:.3f})".format(value/total)
+                
+            plt.text(col, row, value_str, ha="center", va="center", color=color)
 
 
-def plot_cms(cms, classes, diseases):
+def plot_cms(cms, classes, diseases, n_cols=3):
     n_diseases = len(diseases)
     
-    n_cols = 3
     n_rows = math.ceil(n_diseases/n_cols)
     
     for index, disease in enumerate(diseases):
         cm = cms[index]
         plt.subplot(n_rows, n_cols, index+1)
         plot_cm(cm, classes, disease)
+        
+        
+def plot_train_val_cms(train_cms, val_cms, classes, diseases, percentage=False):
+    n_diseases = len(diseases)
+    
+    n_cols = 2
+    n_rows = math.ceil(n_diseases*2/n_cols)
+    
+    plot_index = 1
+    for index, disease in enumerate(diseases):
+        train_cm = train_cms[index]
+        val_cm = val_cms[index]
+
+        plt.subplot(n_rows, n_cols, plot_index)
+        plot_cm(train_cm, classes, disease, percentage=percentage)
+        plot_index += 1
+        
+        plt.subplot(n_rows, n_cols, plot_index)
+        plot_cm(val_cm, classes, disease, percentage=percentage)
+        plot_index += 1
+        
+    print("Left: training")
+    print("Right: validation")
+        
+        

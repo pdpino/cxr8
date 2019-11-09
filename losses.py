@@ -31,6 +31,29 @@ def weighted_bce(output, target, epsilon=1e-5):
 
     return torch.sum(loss)
 
+
+def weighted_bce_by_disease(output, target, epsilon=1e-5):
+    output = output.clamp(min=epsilon, max=1-epsilon)
+    target = target.float()
+
+    batch_size, n_diseases = target.size()
+    
+    total = torch.Tensor().new_full((n_diseases,), batch_size).type(torch.float)
+    positive = torch.sum(target > 0, dim=0).type(torch.float)
+    negative = total - positive
+
+    # If a value is zero, is set to batch_size (so the division results in 1 for that disease)
+    positive = positive + ((positive == 0)*batch_size).type(positive.dtype)
+    negative = negative + ((negative == 0)*batch_size).type(negative.dtype)
+    
+    BP = total / positive
+    BN = total / negative
+    
+    loss = -BP * target * torch.log(output) - BN * (1 - target) * torch.log(1 - output)
+
+    return torch.sum(loss)
+
+
 def focal_loss(output, target, alpha=0.75, gamma=2, epsilon=1e-5):
     """Computes focal loss.
     
@@ -58,8 +81,9 @@ def focal_loss(output, target, alpha=0.75, gamma=2, epsilon=1e-5):
 
 
 _LOSS_FNS = {
-    "wbce_loss": weighted_bce,
-    "focal_loss": focal_loss,
+    "wbce": weighted_bce,
+    "wbce_by_disease": weighted_bce_by_disease,
+    "focal": focal_loss,
 }
 
 AVAILABLE_LOSSES = list(_LOSS_FNS)

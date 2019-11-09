@@ -19,6 +19,8 @@ class CXRDataset(Dataset):
         if dataset_type not in ['train', 'val', 'test']:
             raise ValueError("No such type, must be 'train', 'val', or 'test'")
         
+        self.dataset_type = dataset_type
+        
         self.image_dir = os.path.join(root_dir, 'images')
 
         self.image_format = image_format
@@ -90,8 +92,16 @@ class CXRDataset(Dataset):
         
         # Load the image with a lock
         image_fname = os.path.join(self.image_dir, image_name)
-        with FileLock(image_fname + ".lock"):
-            image = Image.open(image_fname).convert(self.image_format)
+        try:
+            # REVIEW: Is lock necessary for read operation?
+            with FileLock(image_fname + ".lock"):
+                image = Image.open(image_fname).convert(self.image_format)
+        except OSError as e:
+            print(e)
+            print("({}) Failed to load image, may be broken: ".format(self.dataset_type, image_fname))
+
+            # FIXME: a way to ignore the image during training? (though it may broke other things)
+            raise
 
         if self.transform:
             image = self.transform(image)
@@ -130,6 +140,10 @@ class CXRDataset(Dataset):
             y = int(y)
             w = int(w)
             h = int(h)
+            
+            # HACK: this should be fixed in the BBox csv file
+            if disease_name == "Infiltrate":
+                disease_name = "Infiltration"
 
             disease_index = utils.DISEASE_INDEX[disease_name]
             for j, value in enumerate([x, y, w, h]):
