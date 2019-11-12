@@ -15,7 +15,8 @@ import os
 import warnings
 
 from dataset import CXRDataset
-from model import ResnetBasedModel
+# from model import ResnetBasedModel
+import models
 import utils
 import losses
 import optimizers
@@ -26,9 +27,10 @@ ALL_METRICS = ["roc_auc", "prec", "recall", "acc"]
 
 
 class ModelRun:
-    def __init__(self, model, run_name, chosen_diseases):
+    def __init__(self, model, run_name, model_name, chosen_diseases):
         self.model = model
         self.run_name = run_name
+        self.model_name = model_name
         self.chosen_diseases = chosen_diseases
         
         self.writer = None
@@ -48,13 +50,6 @@ class ModelRun:
         self.val_dataset = val_dataset
         self.val_dataloader = val_dataloader
 
-
-
-def get_model_fname(base_dir, run_name, experiment_mode="debug"):
-    folder = os.path.join(base_dir, "models")
-    if experiment_mode:
-        folder = os.path.join(folder, experiment_mode)
-    return os.path.join(folder, run_name + ".pth")
 
 
 def get_log_dir(base_dir, run_name, experiment_mode="debug"):
@@ -162,54 +157,6 @@ def attach_metrics(engine, chosen_diseases, metric_name, MetricClass,
 
         metric = MetricClass(*metric_args, output_transform=transform_disease)
         metric.attach(engine, "{}_{}".format(metric_name, disease))
-
-
-def init_empty_model(chosen_diseases, train_resnet=False):
-    return ResnetBasedModel(train_resnet=train_resnet, n_diseases=len(chosen_diseases))
-
-
-def save_model(base_dir, run_name, experiment_mode, hparam_dict, trainer, model, optimizer):
-    model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
-    torch.save({
-        "hparams": hparam_dict,
-        "epoch": trainer.state.epoch,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-    }, model_fname)
-
-
-def load_model(base_dir, run_name, experiment_mode="", device=None):
-    model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
-    
-    checkpoint = torch.load(model_fname)
-    hparams = checkpoint["hparams"]
-    chosen_diseases = hparams["diseases"].split(",")
-    train_resnet = hparams["train_resnet"]
-    
-    def get_opt_params():
-        params = {}
-        for key, value in hparams.items():
-            if key.startswith("opt_"):
-                key = key[4:]
-                params[key] = value
-        return params
-    
-    opt_params = get_opt_params()
-
-    # Load model
-    model = init_empty_model(chosen_diseases, train_resnet)
-    if device:
-        model = model.to(device)
-    
-    # Load optimizer
-    opt = hparams["opt"]
-    OptClass = optimizers.get_optimizer_class(opt)
-    optimizer = OptClass(model.parameters(), **opt_params)
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-
-    return model, optimizer, chosen_diseases
 
 
 def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, shuffle=False, max_images=None, image_format="RGB"):
@@ -326,7 +273,7 @@ def tb_write_cms(writer, dataset_type, diseases, cms):
 
 
 def tb_write_histogram(writer, model, epoch, wall_time):
-#     accept_all = lambda x: True
+#     accept_all = lambda x: False
 #     ignore_fn = getattr(model, "ignore_param", accept_all)
 
     for name, params in model.named_parameters():
@@ -335,10 +282,81 @@ def tb_write_histogram(writer, model, epoch, wall_time):
 
         writer.add_histogram(name, params.cpu().detach().numpy(), global_step=epoch, walltime=wall_time)
 
+    
+def labels_to_str(labels, chosen_diseases):
+    found = [(disease_name, value) for value, disease_name in zip(labels, chosen_diseases) if value > 0.5]
+    if len(found) > 0:
+        return ", ".join(disease_name for disease_name, _ in found)
+    else:
+        return "No Findings"
+    
+
+def preds_to_str(preds, chosen_diseases):
+    found = [(disease_name, value) for value, disease_name in zip(preds, chosen_diseases)]
+    found = sorted(found, key=lambda x: x[1], reverse=True)
+    if len(found) > 0:
+        return ", ".join("{} ({:.2f})".format(disease_name, value) for disease_name, value in found)
+    else:
+        return "No Findings"
+
+    
+def tb_write_images(writer, model, dataset, chosen_diseases, epoch, device, image_list=None, scale=2):
+    if image_list is None:
+        image_list = list(dataset.label_index["FileName"])
+    
+    for image_name in image_list:
+        image, labels, _, bboxes_raw, are_valid = dataset.get_by_name(image_name)
+
+        # Convert to batch
+        images = image.view(1, *image.shape)
+
+        # Image to GPU
+        images = images.to(device)
+
+        # Pass thru model
+        with torch.no_grad():
+            predictions, _, activations = model(images)
+
+        # Copy bbox
+        bboxes = []
+        bboxes_labels = []
+        for disease_name, bbox, is_valid in zip(chosen_diseases, bboxes_raw, are_valid):
+            if bool(is_valid.item()):
+                x, y, w, h = np.round(bbox.numpy() / scale)
+                bboxes.append(np.array([x, y, x+w, y+h]))
+                bboxes_labels.append(disease_name)
+        bboxes = np.array(bboxes)
+
+        # Write image
+        image = np.interp(image, (image.min(), image.max()), (0, 1))
+        writer.add_image_with_boxes(
+            "Images/" + image_name, image, bboxes, global_step=epoch, labels=bboxes_labels)
+        
+        # Write activations
+        if activations is not None:
+            activations = activations.cpu()
+            for disease_name, activ in zip(chosen_diseases, activations[0]):
+                activ = np.interp(activ, (activ.min(), activ.max()), (0, 1))
+                writer.add_image(
+                    "NN-CAM_" + disease_name + "/" + image_name, np.array([activ]))
+
+            
+        # Write preds and GT to text
+        predictions = predictions[0].cpu().numpy()
+        preds_str = preds_to_str(predictions, chosen_diseases)
+        writer.add_text("Predictions/" + image_name, preds_str, global_step=epoch)
+        
+        gt_str = labels_to_str(labels, chosen_diseases)
+        writer.add_text("Ground-truth/" + image_name, gt_str, global_step=epoch)
+
+        writer.add_text("Results/" + image_name + "/ground_truth", gt_str, global_step=epoch)
+        writer.add_text("Results/" + image_name + "/preds", preds_str, global_step=epoch)
+
 
 def train_model(name="",
                 resume="",
                 base_dir=".",
+                model_name="v0",
                 chosen_diseases=None,
                 n_epochs=10,
                 batch_size=4,
@@ -356,6 +374,7 @@ def train_model(name="",
                 write_graph=False,
                 write_emb=False,
                 write_emb_img=False,
+                write_img=True,
                 image_format="RGB",
                ):
     
@@ -395,11 +414,12 @@ def train_model(name="",
     
     if resume:
         # Load model and optimizer
-        model, optimizer, chosen_diseases = load_model(base_dir, resume, experiment_mode="", device=device)
+        model, model_name, optimizer, opt, chosen_diseases = models.load_model(
+            base_dir, resume, experiment_mode="", device=device)
         model.train(True)
     else:
         # Create model
-        model = init_empty_model(chosen_diseases, train_resnet=train_resnet).to(device)
+        model = models.init_empty_model(model_name, chosen_diseases, train_resnet=train_resnet).to(device)
 
         # Create optimizer
         OptClass = optimizers.get_optimizer_class(opt)
@@ -501,6 +521,7 @@ def train_model(name="",
         "n_epochs": n_epochs,
         "batch_size": batch_size,
         "shuffle": shuffle,
+        "model_name": model_name,
         "opt": opt,
         "loss": loss_name,
         "samples (train, val)": "{},{}".format(train_samples, val_samples),
@@ -547,7 +568,7 @@ def train_model(name="",
     # Save model to disk
     if save:
         print("Saving model...")
-        save_model(base_dir, run_name, experiment_mode, hparam_dict, trainer, model, optimizer)
+        models.save_model(base_dir, run_name, model_name, experiment_mode, hparam_dict, trainer, model, optimizer)
     
     
     # Write graph to TB
@@ -585,7 +606,7 @@ def train_model(name="",
         
     # Save confusion matrices (is expensive to calculate them afterwards)
     if save_cms:
-        # REVIEW: delete this?
+        # REVIEW: delete CM manual calculation?
         # now is calculated with the ConfusionMatrix metric from ignite
 
         print("Saving confusion matrices...")
@@ -643,13 +664,39 @@ def train_model(name="",
 #             print("Val CM 2: ")
 #             print(validator.state.metrics["cm_" + chosen_diseases[0]])
         
+    if write_img:
+        print("Writing images to TB...")
+        test_dataset, test_dataloader = prepare_data(dataset_dir, "test", chosen_diseases, batch_size)
+        
+        # TODO: add a way to select images?
+        # image_list = list(dataset.label_index["FileName"])[:3]
+
+        # Examples in test_dataset:
+        image_list = [
+            "00010277_000.png", # (4 bboxes)
+            "00018427_004.png", # (3 bboxes)
+            # "00021703_001.png", # (3 bboxes)
+            # "00028640_008.png", # (2 bboxes)
+            "00019124_104.png", # (1 bbox)
+            # "00019124_090.png", # (1 bbox)
+            # "00020318_007.png", # (1 bbox)
+            "00000003_000.png", # (0)
+            # "00000003_001.png", # (0)
+            # "00000003_002.png", # (0)
+        ]
+
+        tb_write_images(writer, model, test_dataset, chosen_diseases, n_epochs, device, image_list)
+    
+    
+    
+    
     # Close TB writer
     if experiment_mode != "debug":
         writer.close()
 
 
     # Return values for debugging
-    model_run = ModelRun(model, run_name, chosen_diseases)
+    model_run = ModelRun(model, run_name, model_name, chosen_diseases)
     if experiment_mode == "debug":
         model_run.save_debug_data(writer, trainer, validator, train_dataset, train_dataloader, val_dataset, val_dataloader)
     
@@ -662,6 +709,8 @@ def parse_args():
     parser.add_argument("--name", default="", type=str, help="Additional name to the run")
     parser.add_argument("--resume", default="", type=str, help="If present, resume from another run")
     parser.add_argument("--base-dir", default="/mnt/data/chest-x-ray-8", type=str, help="Base folder")
+    parser.add_argument("--model-name", default="v0", type=str, choices=models.AVAILABLE_MODELS,
+                        help="Model version to use")
     parser.add_argument("--diseases", default=None, nargs="*", type=str, choices=utils.ALL_DISEASES,
                         help="Diseases to train with")
     parser.add_argument("--n-diseases", default=None, type=int, help="If present, select the first n diseases")
@@ -746,6 +795,7 @@ if __name__ == "__main__":
     run = train_model(name=args.name,
                       resume=args.resume,
                       base_dir=args.base_dir,
+                      model_name=args.model_name,
                       chosen_diseases=args.diseases,
                       n_epochs=args.epochs,
                       batch_size=args.batch_size,

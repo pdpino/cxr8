@@ -3,7 +3,7 @@ import torch.nn as nn
 from torchvision import models
 
 class ResnetBasedModel(nn.Module):
-    def __init__(self, train_resnet=False, n_diseases=14, n_features=2048, transition_conv=False):
+    def __init__(self, train_resnet=False, n_diseases=14, n_features=2048):
         """.
         
         params:
@@ -70,6 +70,3 @@ class ResnetBasedModel(nn.Module):
         
         return x, embedding, activations
 
-    def ignore_param(self, name):
-        """Whether or not should ignore a parameter with a certain name."""
-        return "model_ft.fc." in name if name else True
