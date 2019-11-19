@@ -374,7 +374,7 @@ def train_model(name="",
                 write_graph=False,
                 write_emb=False,
                 write_emb_img=False,
-                write_img=True,
+                write_img=False,
                 image_format="RGB",
                ):
     
@@ -731,6 +731,7 @@ def parse_args():
     parser.add_argument("--tb-graph", default=False, action="store_true", help="If present save graph to TB")
     parser.add_argument("--tb-emb", default=False, action="store_true", help="If present save embedding to TB")
     parser.add_argument("--tb-emb-img", default=False, action="store_true", help="If present save embedding with images")
+    parser.add_argument("--tb-img", default=False, action="store_true", help="If present save images and CAM to TB")
     
     loss_group = parser.add_argument_group(title="Losses options")
     loss_group.add_argument("--loss", default="wbce", type=str, choices=losses.AVAILABLE_LOSSES,
@@ -813,6 +814,7 @@ if __name__ == "__main__":
                       write_graph=args.tb_graph,
                       write_emb=args.tb_emb,
                       write_emb_img=args.tb_emb_img,
+                      write_img=args.tb_img,
                       image_format=args.image_format,
                      )
     end_time = time.time()

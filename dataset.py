@@ -40,6 +40,7 @@ class CXRDataset(Dataset):
         
         # Choose diseases names
         if not diseases:
+            # TODO: rename to diseases (is more clear, they are not actually classes)
             self.classes = list(utils.ALL_DISEASES)
         else:
             # Keep only the valid ones
@@ -145,7 +146,10 @@ class CXRDataset(Dataset):
             if disease_name == "Infiltrate":
                 disease_name = "Infiltration"
 
-            disease_index = utils.DISEASE_INDEX[disease_name]
+            if disease_name not in self.classes:
+                continue
+
+            disease_index = self.classes.index(disease_name)
             for j, value in enumerate([x, y, w, h]):
                 bboxes[disease_index, j] = value
 
@@ -154,6 +158,9 @@ class CXRDataset(Dataset):
         return image_name, labels, bboxes, bbox_valid
     
     def get_items_old(self, idx):
+        # TODO: delete this (is deprecated)
+        return None
+
         row = self.label_index.iloc[idx]
         
         # Load image
