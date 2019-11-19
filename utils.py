@@ -35,6 +35,13 @@ def duration_to_str(all_seconds):
     return "{}h {}m {}s".format(hours, minutes, int(seconds))
 
 
+def write_to_txt(arr, fname, sep='\n'):
+    """Writes a list of strings to a file"""
+    with open(fname, 'w') as f:
+        for line in arr:
+            f.write(line + sep)
+
+
 # TODO: separate this file?
 
 import math
