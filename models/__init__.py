@@ -3,15 +3,13 @@ import torch
 import os
 
 import optimizers
-from models import v0, v1, v2
-# from .v0 import ResnetBasedModel
-
-
+from models import v0, v1, v2, v3
 
 _MODELS_DEF = {
     "v0": v0.ResnetBasedModel,
     "v1": v1.ResnetBasedModel,
     "v2": v2.ResnetBasedModel,
+    "v3": v3.ResnetBasedModel,
 }
 
 AVAILABLE_MODELS = list(_MODELS_DEF)

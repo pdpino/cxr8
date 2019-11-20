@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torchvision import models
+import numpy as np # DEBUG
 
 class ResnetBasedModel(nn.Module):
     def __init__(self, train_resnet=False, n_diseases=14, n_features=2048):
@@ -39,18 +40,31 @@ class ResnetBasedModel(nn.Module):
         x = self.model_ft.layer3(x)
         x = self.model_ft.layer4(x) # n_samples, n_features = 2048, height, width
 
-        # print("Before transition: ", x.size())
+        print("Before transition: ", x.size())
 
+        y = x
+        
         x = self.transition(x)
         
-        # print("After transition: ", x.size())
+        # DEBUG
+        eps = 1e-05
+        x2 = x / torch.abs(x + eps)
+        y2 = y / torch.abs(y + eps)
+        sign_shift = ((x2 * y2 + 1) <= eps).sum().item()
+        tot = np.prod(y.size())
+        print("Sign shift: ", sign_shift, sign_shift / tot)
+        print("Diff: ", (x - y).mean().item())
+        y[y==0] = x[y==0]
+        print("Fraction: ", (torch.abs(x)/torch.abs(y)).mean().item())
+        # END DEBUG
+        
+        print("After transition: ", x.size())
         
         pred_weights, pred_bias_unused = list(self.prediction.parameters()) # size: n_diseases, n_features = 2048
         # x: activations from prev layer # size: n_samples, n_features, height = 16, width = 16
         # bbox: for each sample, multiply n_features dimensions
         # --> activations: n_samples, n_diseases, height, width
         activations = torch.matmul(pred_weights, x.transpose(1, 2)).transpose(1, 2)
-        # REVIEW: is this multiplication correct?
         
         # print("\tweights: ", pred_weights.size())
         # print("\tTransposed 0,1: ", x.transpose(0, 1).size())
@@ -58,11 +72,11 @@ class ResnetBasedModel(nn.Module):
         
         x = self.global_pool(x)
         
-        # print("After global pool: ", x.size())
+        print("After global pool: ", x.size())
 
         x = x.view(x.size(0), -1)
         
-        # print("After view: ", x.size())
+        print("After view: ", x.size())
         
         embedding = x
         
