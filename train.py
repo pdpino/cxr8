@@ -1,7 +1,7 @@
 import torch
 # import torch.optim as optim
-from torch.utils.data import DataLoader
-from torchvision import transforms
+# from torch.utils.data import DataLoader
+# from torchvision import transforms
 from tensorboardX import SummaryWriter
 from ignite.engine import Engine, Events
 from ignite.metrics import Accuracy, Precision, Recall, RunningAverage, ConfusionMatrix, VariableAccumulation #, EpochMetric
@@ -14,13 +14,13 @@ import time
 import os
 import warnings
 
-from dataset import CXRDataset
-# from model import ResnetBasedModel
+# from dataset import CXRDataset
 import models
 import utils
 import losses
 import optimizers
 import utilsT
+from postTrain import post_train
 
 
 ALL_METRICS = ["roc_auc", "prec", "recall", "acc"]
@@ -157,28 +157,6 @@ def attach_metrics(engine, chosen_diseases, metric_name, MetricClass,
 
         metric = MetricClass(*metric_args, output_transform=transform_disease)
         metric.attach(engine, "{}_{}".format(metric_name, disease))
-
-
-def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, shuffle=False, max_images=None, image_format="RGB"):
-    transform_image = get_image_transformation()
-
-    dataset = CXRDataset(dataset_dir,
-                         dataset_type=dataset_type,
-                         transform=transform_image,
-                         diseases=chosen_diseases,
-                         max_images=max_images,
-                         image_format=image_format)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-    
-    return dataset, dataloader
-
-
-def get_image_transformation(image_size=512):
-    mean = 0.50576189
-    return transforms.Compose([transforms.Resize(image_size),
-                               transforms.ToTensor(),
-                               transforms.Normalize([mean], [1.])
-                              ])
 
 
 def tb_write_graph(writer, model, dataloader, device):
@@ -367,7 +345,7 @@ def train_model(name="",
                 loss_params={},
                 train_resnet=False,
                 log_metrics=None, flush_secs=120,
-                train_max_images=None, val_max_images=None,
+                train_max_images=None, val_max_images=None, test_max_images=None,
                 experiment_mode="debug",
                 save=True,
                 save_cms=True, # Note that in this case, save_cms (to disk) includes write_cms (to TB)
@@ -387,26 +365,28 @@ def train_model(name="",
 
     # Dataset handling
     print("Loading train dataset...")
-    train_dataset, train_dataloader = prepare_data(dataset_dir,
-                                                   "train",
-                                                   chosen_diseases,
-                                                   batch_size,
-                                                   shuffle=shuffle,
-                                                   max_images=train_max_images,
-                                                   image_format=image_format,
-                                                  )
+    train_dataset, train_dataloader = utilsT.prepare_data(dataset_dir,
+                                                          "train",
+                                                          chosen_diseases,
+                                                          batch_size,
+                                                          shuffle=shuffle,
+                                                          max_images=train_max_images,
+                                                          image_format=image_format,
+                                                         )
     train_samples, _ = train_dataset.size()
 
     print("Loading val dataset...")
-    val_dataset, val_dataloader = prepare_data(dataset_dir,
-                                               "val",
-                                               chosen_diseases,
-                                               batch_size,
-                                               max_images=val_max_images,
-                                               image_format=image_format,
-                                              )
+    val_dataset, val_dataloader = utilsT.prepare_data(dataset_dir,
+                                                      "val",
+                                                      chosen_diseases,
+                                                      batch_size,
+                                                      max_images=val_max_images,
+                                                      image_format=image_format,
+                                                     )
     val_samples, _ = val_dataset.size()
     
+  
+
     # Should be the same than chosen_diseases
     chosen_diseases = list(train_dataset.classes)
     print("Chosen diseases: ", chosen_diseases)
@@ -606,9 +586,6 @@ def train_model(name="",
         
     # Save confusion matrices (is expensive to calculate them afterwards)
     if save_cms:
-        # REVIEW: delete CM manual calculation?
-        # now is calculated with the ConfusionMatrix metric from ignite
-
         print("Saving confusion matrices...")
         # Assure folder
         cms_dir = os.path.join(base_dir, "cms", experiment_mode)
@@ -631,24 +608,16 @@ def train_model(name="",
             return np.array(cms)
         
         # Train confusion matrix
-        # n_train_images = train_dataset.size()[0]
-        # all_results_train = utils.predict_all(model, train_dataloader, device, n_train_images, n_diseases)
-        # train_cms = utils.calculate_all_cms(*all_results_train)
         train_cms = extract_cms(trainer.state.metrics)
-
         np.save(base_fname + "_train", train_cms)
         tb_write_cms(writer, "train", chosen_diseases, train_cms)
         
         # Validation confusion matrix
-        # n_val_images = val_dataset.size()[0]
-        # all_results_val = utils.predict_all(model, val_dataloader, device, n_val_images, n_diseases)
-        # val_cms = utils.calculate_all_cms(*all_results_val)
         val_cms = extract_cms(validator.state.metrics)
-
         np.save(base_fname + "_val", val_cms)
         tb_write_cms(writer, "val", chosen_diseases, val_cms)
         
-        # All confusion matrix
+        # All confusion matrix (train + val)
         all_cms = train_cms + val_cms
         np.save(base_fname + "_all", all_cms)
         
@@ -665,24 +634,58 @@ def train_model(name="",
 #             print(validator.state.metrics["cm_" + chosen_diseases[0]])
         
     if write_img:
+        # NOTE: this option is not recommended, use Testing notebook to plot and analyze images
+        
+        
         print("Writing images to TB...")
-        test_dataset, test_dataloader = prepare_data(dataset_dir, "test", chosen_diseases, batch_size)
+        
+        test_dataset, test_dataloader = utilsT.prepare_data(dataset_dir,
+                                                            "test",
+                                                            chosen_diseases,
+                                                            batch_size,
+                                                            max_images=test_max_images,
+                                                           )
         
         # TODO: add a way to select images?
-        # image_list = list(dataset.label_index["FileName"])[:3]
+        # image_list = list(test_dataset.label_index["FileName"])[:3]
 
-        # Examples in test_dataset:
+        # Examples in test_dataset (with bboxes available):
         image_list = [
-            "00010277_000.png", # (4 bboxes)
-            "00018427_004.png", # (3 bboxes)
-            # "00021703_001.png", # (3 bboxes)
-            # "00028640_008.png", # (2 bboxes)
-            "00019124_104.png", # (1 bbox)
-            # "00019124_090.png", # (1 bbox)
-            # "00020318_007.png", # (1 bbox)
+            # "00010277_000.png", # (Effusion, Infiltrate, Mass, Pneumonia)
+            # "00018427_004.png", # (Atelectasis, Effusion, Mass)
+            # "00021703_001.png", # (Atelectasis, Effusion, Infiltrate)
+            # "00028640_008.png", # (Effusion, Infiltrate)
+            # "00019124_104.png", # (Pneumothorax)
+            # "00019124_090.png", # (Nodule)
+            # "00020318_007.png", # (Pneumothorax)
             "00000003_000.png", # (0)
             # "00000003_001.png", # (0)
             # "00000003_002.png", # (0)
+            "00000732_005.png", # (Cardiomegaly, Pneumothorax)
+            # "00012261_001.png", # (Cardiomegaly, Pneumonia)
+            # "00013249_033.png", # (Cardiomegaly, Pneumonia)
+            # "00029808_003.png", # (Cardiomegaly, Pneumonia)
+            # "00022215_012.png", # (Cardiomegaly, Pneumonia)
+            # "00011402_007.png", # (Cardiomegaly, Pneumonia)
+            # "00019018_007.png", # (Cardiomegaly, Infiltrate)
+            # "00021009_001.png", # (Cardiomegaly, Infiltrate)
+            # "00013670_151.png", # (Cardiomegaly, Infiltrate)
+            # "00005066_030.png", # (Cardiomegaly, Infiltrate, Effusion)
+            "00012288_000.png", # (Cardiomegaly)
+            "00008399_007.png", # (Cardiomegaly)
+            "00005532_000.png", # (Cardiomegaly)
+            "00005532_014.png", # (Cardiomegaly)
+            "00005532_016.png", # (Cardiomegaly)
+            "00005827_000.png", # (Cardiomegaly)
+            # "00006912_007.png", # (Cardiomegaly)
+            # "00007037_000.png", # (Cardiomegaly)
+            # "00007043_000.png", # (Cardiomegaly)
+            # "00012741_004.png", # (Cardiomegaly)
+            # "00007551_020.png", # (Cardiomegaly)
+            # "00007735_040.png", # (Cardiomegaly)
+            # "00008339_010.png", # (Cardiomegaly)
+            # "00008365_000.png", # (Cardiomegaly)
+            # "00012686_003.png", # (Cardiomegaly)
         ]
 
         tb_write_images(writer, model, test_dataset, chosen_diseases, n_epochs, device, image_list)
@@ -726,6 +729,7 @@ def parse_args():
     parser.add_argument("--flush", "--flush-secs", default=120, type=int, help="Tensorboard flush seconds")
     parser.add_argument("--train-images", default=None, type=int, help="Max train images")
     parser.add_argument("--val-images", default=None, type=int, help="Max validation images")
+    parser.add_argument("--test-images", default=None, type=int, help="Max test images")
     parser.add_argument("--non-debug", default=False, action="store_true",
                         help="If present, is considered an official model")
     parser.add_argument("--tb-graph", default=False, action="store_true", help="If present save graph to TB")
@@ -755,6 +759,7 @@ def parse_args():
         args.flush = 10
         args.train_images = args.train_images or 100
         args.val_images = args.val_images or 100
+        args.test_images = args.test_images or 100
         
     # Prepare loss_params
     if args.loss == "focal_loss":
@@ -810,6 +815,7 @@ if __name__ == "__main__":
                       flush_secs=args.flush,
                       train_max_images=args.train_images,
                       val_max_images=args.val_images,
+                      test_max_images=args.test_images,
                       experiment_mode=experiment_mode,
                       write_graph=args.tb_graph,
                       write_emb=args.tb_emb,
@@ -822,4 +828,18 @@ if __name__ == "__main__":
     print("-"*50)
     print("Total training time: ", utils.duration_to_str(end_time - start_time))
     print("Run name: ", run.run_name)
+    print("-"*50)
+        
+    print("Running post_train...")
+    start = time.time()
+    post_train(model=run.model,
+               chosen_diseases=run.chosen_diseases,
+               run_name=run.run_name,
+               base_dir=args.base_dir,
+               test_max_images=args.test_images,
+               batch_size=args.batch_size,
+               experiment_mode=experiment_mode,
+              )
+    end = time.time()
+    print("Total post time: ", utils.duration_to_str(end - start))
     print("="*50)

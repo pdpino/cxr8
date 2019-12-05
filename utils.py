@@ -1,6 +1,10 @@
 from datetime import datetime
 import time
 
+BASE_DIR = "/mnt/data/chest-x-ray-8" # In server
+DATASET_DIR = BASE_DIR + "/dataset"
+CMS_DIR = BASE_DIR + "/cms"
+
 ALL_DISEASES = [
     'Atelectasis',
     'Cardiomegaly',
@@ -56,12 +60,13 @@ def predict_all(model, dataloader, device, n_images, n_diseases):
     """
     all_predictions = torch.zeros(n_images, n_diseases)
     all_ground_truths = torch.zeros(n_images, n_diseases)
+    all_image_names = [0] * n_images
 
     batch_size = None
     image_index = 0
 
     for data_batch in dataloader:
-        images, labels, _, _, _ = data_batch
+        images, labels, image_names, _, _ = data_batch
 
         images = images.to(device)
 
@@ -70,19 +75,23 @@ def predict_all(model, dataloader, device, n_images, n_diseases):
         if batch_size is None:
             batch_size = current_batch_size
 
+        index_from = image_index * batch_size
+        index_to = index_from + current_batch_size
+        
+        if index_from >= n_images:
+            break
+
         with torch.no_grad():
             predictions, _, _ = model(images)
 
-        index_from = image_index * batch_size
-        index_to = index_from + current_batch_size
-
         all_predictions[index_from:index_to] = predictions.cpu()
         all_ground_truths[index_from:index_to] = torch.Tensor(labels.float())
+        all_image_names[index_from:index_to] = image_names
         
         image_index += 1
 
 
-    return all_predictions.numpy(), all_ground_truths.numpy()
+    return all_predictions.numpy(), all_ground_truths.numpy(), all_image_names
 
 
 ### Confusion matrices
@@ -165,4 +174,56 @@ def plot_train_val_cms(train_cms, val_cms, classes, diseases, percentage=False):
     print("Left: training")
     print("Right: validation")
         
+## CMS with names (i.e. which images are TP, FP, TN, FN)
+def calculate_all_cms_names(all_predictions, all_ground_truths, image_names, chosen_diseases):
+    n_diseases = all_predictions.shape[1]
+
+    def get_names(condition):
+        condition = condition.flatten()
+        return [image_name for image_name, is_good in zip(image_names, condition) if is_good]
+    
+    thresh = 0.5
+
+    cms = []
+
+    for disease_index, disease_name in enumerate(chosen_diseases):
+        preds = all_predictions[:, disease_index]
+        gts = all_ground_truths[:, disease_index]
+
+        TP = get_names((preds > thresh)  & (gts > thresh))
+        FP = get_names((preds > thresh)  & (gts <= thresh))
+        TN = get_names((preds <= thresh) & (gts <= thresh))
+        FN = get_names((preds <= thresh) & (gts > thresh))
+        cms.append({
+            "TP": TP,
+            "FP": FP,
+            "TN": TN,
+            "FN": FN,
+        })
         
+    return cms
+
+
+import json
+
+def save_cms_names(cms, base_fname, chosen_diseases):
+    for cm, disease_name in zip(cms, chosen_diseases):
+        with open(base_fname + "_" + disease_name + ".json", "w") as f:
+            json.dump(cm, f)
+        
+
+def load_cms_names(fname, disease_name):
+    with open(fname + "_" + disease_name + ".json") as f:
+        cms_names = json.load(f)
+        
+    TP = cms_names["TP"]
+    FP = cms_names["FP"]
+    TN = cms_names["TN"]
+    FN = cms_names["FN"]
+    
+    cm = np.array([
+        [len(TN), len(FP)],
+        [len(FN), len(TP)],
+    ])
+
+    return TP, FP, TN, FN, cm

@@ -40,25 +40,25 @@ class ResnetBasedModel(nn.Module):
         x = self.model_ft.layer3(x)
         x = self.model_ft.layer4(x) # n_samples, n_features = 2048, height, width
 
-        print("Before transition: ", x.size())
+#         print("Before transition: ", x.size())
 
-        y = x
+#         y = x # DEBUG
         
         x = self.transition(x)
         
         # DEBUG
-        eps = 1e-05
-        x2 = x / torch.abs(x + eps)
-        y2 = y / torch.abs(y + eps)
-        sign_shift = ((x2 * y2 + 1) <= eps).sum().item()
-        tot = np.prod(y.size())
-        print("Sign shift: ", sign_shift, sign_shift / tot)
-        print("Diff: ", (x - y).mean().item())
-        y[y==0] = x[y==0]
-        print("Fraction: ", (torch.abs(x)/torch.abs(y)).mean().item())
+#         eps = 1e-05
+#         x2 = x / torch.abs(x + eps)
+#         y2 = y / torch.abs(y + eps)
+#         sign_shift = ((x2 * y2 + 1) <= eps).sum().item()
+#         tot = np.prod(y.size())
+#         print("Sign shift: ", sign_shift, sign_shift / tot)
+#         print("Diff: ", (x - y).mean().item())
+#         y[y==0] = x[y==0]
+#         print("Fraction: ", (torch.abs(x)/torch.abs(y)).mean().item())
         # END DEBUG
         
-        print("After transition: ", x.size())
+#         print("After transition: ", x.size())
         
         pred_weights, pred_bias_unused = list(self.prediction.parameters()) # size: n_diseases, n_features = 2048
         # x: activations from prev layer # size: n_samples, n_features, height = 16, width = 16
@@ -72,11 +72,11 @@ class ResnetBasedModel(nn.Module):
         
         x = self.global_pool(x)
         
-        print("After global pool: ", x.size())
+#         print("After global pool: ", x.size())
 
         x = x.view(x.size(0), -1)
         
-        print("After view: ", x.size())
+#         print("After view: ", x.size())
         
         embedding = x
         

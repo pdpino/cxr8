@@ -78,10 +78,19 @@ class CXRDataset(Dataset):
         n_images, _ = self.label_index.shape
         return (n_images, self.n_diseases)
 
-    def get_by_name(self, image_name):
+    def get_by_name(self, image_name, chosen_diseases=None):
         idx = self.names_to_idx[image_name]
 
-        return self[idx]
+        image, labels, image_name, bboxes, bbox_valid = self[idx]
+        
+        if chosen_diseases is not None:
+            labels = [
+                label
+                for index, label in enumerate(labels)
+                if self.classes[index] in chosen_diseases
+            ]
+        
+        return image, labels, image_name, bboxes, bbox_valid
         
     
     def __len__(self):

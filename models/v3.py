@@ -28,6 +28,15 @@ class ResnetBasedModel(nn.Module):
             nn.Sigmoid()
         )
 
+        self.saved_gradient = None
+        self.handler = None
+        
+    def save_gradient(self, grad):
+        self.saved_gradient = grad
+        self.handler.remove()
+
+        return None
+        
     def forward(self, x):
         x = self.model_ft.conv1(x)
         x = self.model_ft.bn1(x)
@@ -40,6 +49,11 @@ class ResnetBasedModel(nn.Module):
         x = self.model_ft.layer4(x) # n_samples, 2048, height=16, width=16
 
         # print("After resnet: ", x.size())
+        
+        # FIXME
+#         x.retain_grad()
+#         print(x.retains_grad)
+#         handler = x.register_hook(self.save_gradient)
         
         pred_weights, pred_bias_unused = list(self.prediction.parameters()) # size: n_diseases, n_features = 2048
         # x: activations from prev layer # size: n_samples, n_features, height = 16, width = 16
