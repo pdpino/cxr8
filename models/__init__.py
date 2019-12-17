@@ -50,15 +50,16 @@ def load_model(base_dir, run_name, experiment_mode="", device=None):
     chosen_diseases = hparams["diseases"].split(",")
     train_resnet = hparams["train_resnet"]
     
-    def get_opt_params():
+    def extract_params(name):
         params = {}
+        prefix = name + "_"
         for key, value in hparams.items():
-            if key.startswith("opt_"):
-                key = key[4:]
+            if key.startswith(prefix):
+                key = key[len(prefix):]
                 params[key] = value
         return params
     
-    opt_params = get_opt_params()
+    opt_params = extract_params("opt")
 
     # Load model
     model = init_empty_model(model_name, chosen_diseases, train_resnet)
@@ -66,11 +67,16 @@ def load_model(base_dir, run_name, experiment_mode="", device=None):
         model = model.to(device)
     
     # Load optimizer
-    opt = hparams["opt"]
-    OptClass = optimizers.get_optimizer_class(opt)
+    opt_name = hparams["opt"]
+    OptClass = optimizers.get_optimizer_class(opt_name)
     optimizer = OptClass(model.parameters(), **opt_params)
 
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
 
-    return model, model_name, optimizer, opt, chosen_diseases
+    # Load loss
+    loss_name = hparams["loss"]
+    loss_params = extract_params("loss")
+    
+    # TODO: make a class to hold all of these values (and avoid changing a lot of code after any change here)
+    return model, model_name, optimizer, opt_name, loss_name, loss_params, chosen_diseases

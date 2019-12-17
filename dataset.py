@@ -28,6 +28,7 @@ class CXRDataset(Dataset):
         self.transform = transform if transform is not None else transforms.ToTensor()
 
         # Load csv files
+        self.dataset_type = dataset_type
         labels_fname = os.path.join(root_dir, dataset_type + '_label.csv')
         self.label_index = pd.read_csv(labels_fname, header=0)
         

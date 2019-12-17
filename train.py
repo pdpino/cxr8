@@ -16,11 +16,11 @@ import warnings
 
 # from dataset import CXRDataset
 import models
-import utils
 import losses
 import optimizers
+import utils
 import utilsT
-from postTrain import post_train
+from test import save_cms_with_names, evaluate_model
 
 
 ALL_METRICS = ["roc_auc", "prec", "recall", "acc"]
@@ -57,106 +57,6 @@ def get_log_dir(base_dir, run_name, experiment_mode="debug"):
     if experiment_mode:
         folder = os.path.join(folder, experiment_mode)
     return os.path.join(folder, run_name)
-
-
-def get_step_fn(model, optimizer, device, loss_name, loss_params={}, training=True):
-    """Creates a step function for an Engine."""
-    loss_fn = losses.get_loss_function(loss_name, **loss_params)
-    
-    def step_fn(engine, data_batch):
-        # Input and sizes
-        images, labels, names, _, _ = data_batch
-        n_samples, n_labels = labels.size()
-        
-        # Move tensors to GPU
-        images = images.to(device)
-        labels = labels.to(device)
-
-        # Enable training
-        model.train(training)
-        torch.set_grad_enabled(training) # enable recording gradients
-
-        # zero the parameter gradients
-        optimizer.zero_grad()
-
-        # Forward, receive outputs from the model and segments (bboxes)
-        outputs, embedding_unused, segments_unused = model(images)
-
-#         if bool(torch.isnan(outputs).any().item()):
-#             warnings.warn("Nans found in prediction")
-#             outputs[outputs != outputs] = 0 # Set NaNs to 0
-        
-        # Compute classification loss
-        loss = loss_fn(outputs, labels)
-
-#         if bool(torch.isnan(loss).any().item()):
-#             warnings.warn("Nans found in loss: {}".format(loss))
-#             loss[loss != loss] = 0
-        
-        batch_loss = loss.item()
-
-        if training:
-            loss.backward()
-            optimizer.step()
-
-        return batch_loss, outputs, labels
-
-    return step_fn
-
-
-def get_transform_one_label(label_index, use_round=True):
-    """Creates a transform function to extract one label from a multi-label output."""
-    def transform_fn(output):
-        _, y_pred, y_true = output
-        
-        y_pred = y_pred[:, label_index]
-        y_true = y_true[:, label_index]
-        
-        if use_round:
-            y_pred = torch.round(y_pred)
-
-        return y_pred, y_true
-    return transform_fn
-
-
-def get_transform_cm(label_index, num_classes=2):
-    """Creates a transform function to prepare the input for the ConfusionMatrix metric."""
-    def transform_fn(output):
-        _, y_pred, y_true = output
-        
-        # print("ORIGINAL: ", torch.round(y_pred[:, label_index]).long())
-        y_pred = to_onehot(torch.round(y_pred[:, label_index]).long(), num_classes)
-        y_true = y_true[:, label_index]
-        
-        # print("TO: ", y_pred)
-
-        return y_pred, y_true
-    
-    return transform_fn
-
-
-def get_count_positives(label_index):
-    def count_positives_fn(result):
-        """Count positive examples in a batch (for a given disease index)."""
-        _, _, labels = result
-        return torch.sum(labels[:, label_index]).item()
-
-    return count_positives_fn
-
-
-def attach_metrics(engine, chosen_diseases, metric_name, MetricClass,
-                   use_round=True,
-                   get_transform_fn=None,
-                   metric_args=()):
-    """Attaches one metric per label to an engine."""
-    for index, disease in enumerate(chosen_diseases):
-        if get_transform_fn:
-            transform_disease = get_transform_fn(index)
-        else:
-            transform_disease = get_transform_one_label(index, use_round=use_round)
-
-        metric = MetricClass(*metric_args, output_transform=transform_disease)
-        metric.attach(engine, "{}_{}".format(metric_name, disease))
 
 
 def tb_write_graph(writer, model, dataloader, device):
@@ -394,7 +294,7 @@ def train_model(name="",
     
     if resume:
         # Load model and optimizer
-        model, model_name, optimizer, opt, chosen_diseases = models.load_model(
+        model, model_name, optimizer, opt, loss_name, loss_params, chosen_diseases = models.load_model(
             base_dir, resume, experiment_mode="", device=device)
         model.train(True)
     else:
@@ -425,31 +325,35 @@ def train_model(name="",
     
 
     # Create validator engine
-    validator = Engine(get_step_fn(model, optimizer, device, loss_name, loss_params, False))
+    validator = Engine(utilsT.get_step_fn(model, optimizer, device, loss_name, loss_params, False))
 
     val_loss = RunningAverage(output_transform=lambda x: x[0], alpha=1)
     val_loss.attach(validator, loss_name)
     
-    attach_metrics(validator, chosen_diseases, "prec", Precision, True)
-    attach_metrics(validator, chosen_diseases, "recall", Recall, True)
-    attach_metrics(validator, chosen_diseases, "acc", Accuracy, True)
-    attach_metrics(validator, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
-    attach_metrics(validator, chosen_diseases, "cm", ConfusionMatrix, get_transform_fn=get_transform_cm, metric_args=(2,))
-    attach_metrics(validator, chosen_diseases, "positives", RunningAverage, get_transform_fn=get_count_positives)
+    utilsT.attach_metrics(validator, chosen_diseases, "prec", Precision, True)
+    utilsT.attach_metrics(validator, chosen_diseases, "recall", Recall, True)
+    utilsT.attach_metrics(validator, chosen_diseases, "acc", Accuracy, True)
+    utilsT.attach_metrics(validator, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
+    utilsT.attach_metrics(validator, chosen_diseases, "cm", ConfusionMatrix,
+                   get_transform_fn=utilsT.get_transform_cm, metric_args=(2,))
+    utilsT.attach_metrics(validator, chosen_diseases, "positives", RunningAverage,
+                   get_transform_fn=utilsT.get_count_positives)
 
     
     # Create trainer engine
-    trainer = Engine(get_step_fn(model, optimizer, device, loss_name, loss_params, True))
+    trainer = Engine(utilsT.get_step_fn(model, optimizer, device, loss_name, loss_params, True))
     
     train_loss = RunningAverage(output_transform=lambda x: x[0], alpha=1)
     train_loss.attach(trainer, loss_name)
     
-    attach_metrics(trainer, chosen_diseases, "acc", Accuracy, True)
-    attach_metrics(trainer, chosen_diseases, "prec", Precision, True)
-    attach_metrics(trainer, chosen_diseases, "recall", Recall, True)
-    attach_metrics(trainer, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
-    attach_metrics(trainer, chosen_diseases, "cm", ConfusionMatrix, get_transform_fn=get_transform_cm, metric_args=(2,))
-    attach_metrics(trainer, chosen_diseases, "positives", RunningAverage, get_transform_fn=get_count_positives)
+    utilsT.attach_metrics(trainer, chosen_diseases, "acc", Accuracy, True)
+    utilsT.attach_metrics(trainer, chosen_diseases, "prec", Precision, True)
+    utilsT.attach_metrics(trainer, chosen_diseases, "recall", Recall, True)
+    utilsT.attach_metrics(trainer, chosen_diseases, "roc_auc", utilsT.RocAucMetric, False)
+    utilsT.attach_metrics(trainer, chosen_diseases, "cm", ConfusionMatrix,
+                          get_transform_fn=utilsT.get_transform_cm, metric_args=(2,))
+    utilsT.attach_metrics(trainer, chosen_diseases, "positives", RunningAverage,
+                          get_transform_fn=utilsT.get_count_positives)
     
 
     timer = Timer(average=True)
@@ -697,6 +601,20 @@ def train_model(name="",
     if experiment_mode != "debug":
         writer.close()
 
+    
+    # Run post_train
+    print("-"*50)
+    print("Running post_train...")
+    
+    print("Loading test dataset...")
+    test_dataset, test_dataloader = utilsT.prepare_data(
+        dataset_dir, "test", chosen_diseases, batch_size, max_images=test_max_images)
+    
+    save_cms_with_names(run_name, experiment_mode, model, test_dataset, test_dataloader, chosen_diseases)
+
+    evaluate_model(run_name, model, optimizer, device, loss_name, loss_params, chosen_diseases,
+                   test_dataloader, experiment_mode=experiment_mode, base_dir=base_dir)
+
 
     # Return values for debugging
     model_run = ModelRun(model, run_name, model_name, chosen_diseases)
@@ -705,7 +623,8 @@ def train_model(name="",
     
     return model_run
 
-    
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a model", usage="%(prog)s [options]")
     
@@ -826,20 +745,6 @@ if __name__ == "__main__":
     end_time = time.time()
     
     print("-"*50)
-    print("Total training time: ", utils.duration_to_str(end_time - start_time))
+    print("Total time: ", utils.duration_to_str(end_time - start_time))
     print("Run name: ", run.run_name)
-    print("-"*50)
-        
-    print("Running post_train...")
-    start = time.time()
-    post_train(model=run.model,
-               chosen_diseases=run.chosen_diseases,
-               run_name=run.run_name,
-               base_dir=args.base_dir,
-               test_max_images=args.test_images,
-               batch_size=args.batch_size,
-               experiment_mode=experiment_mode,
-              )
-    end = time.time()
-    print("Total post time: ", utils.duration_to_str(end - start))
     print("="*50)

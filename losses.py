@@ -82,6 +82,7 @@ def focal_loss(output, target, alpha=0.75, gamma=2, epsilon=1e-5):
 
 _LOSS_FNS = {
     "wbce": weighted_bce,
+    "wbce_loss": weighted_bce,
     "wbce_by_disease": weighted_bce_by_disease,
     "focal": focal_loss,
 }
