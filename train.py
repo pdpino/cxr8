@@ -1,11 +1,12 @@
 import torch
+from torch.nn import DataParallel
 # import torch.optim as optim
 # from torch.utils.data import DataLoader
 # from torchvision import transforms
 from tensorboardX import SummaryWriter
 from ignite.engine import Engine, Events
 from ignite.metrics import Accuracy, Precision, Recall, RunningAverage, ConfusionMatrix, VariableAccumulation #, EpochMetric
-from ignite.handlers import Timer
+from ignite.handlers import Timer #, EarlyStopping
 from ignite.utils import to_onehot
 
 import numpy as np
@@ -306,6 +307,9 @@ def train_model(name="",
         optimizer = OptClass(model.parameters(), **opt_params)
         # print("OPT: ", opt_params)
     
+    # Allow multiple GPUs
+    model = DataParallel(model)
+    
     # Tensorboard log options
     run_name = utils.get_timestamp()
     if name:
@@ -359,7 +363,17 @@ def train_model(name="",
     timer = Timer(average=True)
     timer.attach(trainer, start=Events.EPOCH_STARTED, step=Events.EPOCH_COMPLETED)
 
+    # TODO: Early stopping
+#     def score_function(engine):
+#         val_loss = engine.state.metrics[loss_name]
+#         return -val_loss
 
+#     handler = EarlyStopping(patience=10, score_function=score_function, trainer=trainer)
+#     validator.add_event_handler(Events.COMPLETED, handler)
+    
+    
+    
+    
     # Metrics callbacks
     if log_metrics is None:
         log_metrics = list(ALL_METRICS)
@@ -394,7 +408,8 @@ def train_model(name="",
 
         tb_write_histogram(writer, model, epoch, wall_time)
         
-        print("Finished epoch {}/{}, loss {} (val {})".format(epoch, max_epochs, train_loss, val_loss))
+        print("Finished epoch {}/{}, loss {:.3f}, val loss {:.3f} (took {})".format(
+            epoch, max_epochs, train_loss, val_loss, utils.duration_to_str(int(timer._elapsed()))))
 
         
     # Hparam dict
