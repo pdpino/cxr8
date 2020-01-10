@@ -239,6 +239,7 @@ def train_model(name="",
                 chosen_diseases=None,
                 n_epochs=10,
                 batch_size=4,
+                oversample=False,
                 shuffle=False,
                 opt="sgd",
                 opt_params={},
@@ -255,6 +256,7 @@ def train_model(name="",
                 write_emb_img=False,
                 write_img=False,
                 image_format="RGB",
+                multiple_gpu=False,
                ):
     
     # Choose GPU
@@ -270,6 +272,7 @@ def train_model(name="",
                                                           "train",
                                                           chosen_diseases,
                                                           batch_size,
+                                                          oversample=oversample,
                                                           shuffle=shuffle,
                                                           max_images=train_max_images,
                                                           image_format=image_format,
@@ -308,7 +311,9 @@ def train_model(name="",
         # print("OPT: ", opt_params)
     
     # Allow multiple GPUs
-    model = DataParallel(model)
+    if multiple_gpu:
+        model = DataParallel(model)
+
     
     # Tensorboard log options
     run_name = utils.get_timestamp()
@@ -655,6 +660,9 @@ def parse_args():
     parser.add_argument("-bs", "--batch-size", default=4, type=int, help="Batch size")
     parser.add_argument("--shuffle", default=False, action="store_true",
                         help="If present, shuffles the train data at every epoch")
+    parser.add_argument("-os", "--oversample", default=False, action="store_true",
+                        help="If present, oversamples the data to avoid class unbalance. \
+                        It uses the first disease and shuffles the data")
     parser.add_argument("--resnet", "--train-resnet", default=False, action="store_true",
                         help="Whether to retrain resnet layers or not")
     parser.add_argument("--image-format", default="RGB", type=str, help="Image format passed to Pillow")
@@ -666,6 +674,8 @@ def parse_args():
     parser.add_argument("--test-images", default=None, type=int, help="Max test images")
     parser.add_argument("--non-debug", default=False, action="store_true",
                         help="If present, is considered an official model")
+    parser.add_argument("--multiple-gpu", default=False, action="store_true",
+                        help="If present, batch may be splitted across GPUs")
     parser.add_argument("--tb-graph", default=False, action="store_true", help="If present save graph to TB")
     parser.add_argument("--tb-emb", default=False, action="store_true", help="If present save embedding to TB")
     parser.add_argument("--tb-emb-img", default=False, action="store_true", help="If present save embedding with images")
@@ -739,6 +749,7 @@ if __name__ == "__main__":
                       chosen_diseases=args.diseases,
                       n_epochs=args.epochs,
                       batch_size=args.batch_size,
+                      oversample=args.oversample,
                       shuffle=args.shuffle,
                       opt=args.opt,
                       opt_params=args.opt_params,
@@ -756,6 +767,7 @@ if __name__ == "__main__":
                       write_emb_img=args.tb_emb_img,
                       write_img=args.tb_img,
                       image_format=args.image_format,
+                      multiple_gpu=args.multiple_gpu,
                      )
     end_time = time.time()
     

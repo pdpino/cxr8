@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score
 from ignite.metrics import EpochMetric
 from ignite.utils import to_onehot
 
-from dataset import CXRDataset
+from dataset import CXRDataset, CXRUnbalancedSampler
 import losses
 
 
@@ -32,7 +32,8 @@ def roc_auc_compute_fn(y_preds, y_true):
 def RocAucMetric(**kwargs):
     return EpochMetric(roc_auc_compute_fn, **kwargs)
 
-def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, shuffle=False, max_images=None, image_format="RGB"):
+def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, oversample=False,
+                 shuffle=False, max_images=None, image_format="RGB"):
     transform_image = get_image_transformation()
 
     dataset = CXRDataset(dataset_dir,
@@ -41,7 +42,11 @@ def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, shuffle
                          diseases=chosen_diseases,
                          max_images=max_images,
                          image_format=image_format)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+    if oversample:
+        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=CXRUnbalancedSampler(dataset))
+    else:
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
     
     return dataset, dataloader
 

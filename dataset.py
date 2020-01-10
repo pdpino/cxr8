@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 from torchvision import transforms
 from torchvision.transforms import functional as F
 import pandas as pd
@@ -44,12 +44,10 @@ class CXRDataset(Dataset):
             # TODO: rename to diseases (is more clear, they are not actually classes)
             self.classes = list(utils.ALL_DISEASES)
         else:
-            # Keep only the valid ones
-            all_diseases_set = set(utils.ALL_DISEASES)
-            diseases_set = set(diseases)
-            self.classes = list(diseases_set.intersection(all_diseases_set))
+            # Keep only the ones that exist
+            self.classes = [d for d in diseases if d in utils.ALL_DISEASES]
             
-            not_found_diseases = list(diseases_set - all_diseases_set)
+            not_found_diseases = list(set(self.classes) - set(utils.ALL_DISEASES))
             if not_found_diseases:
                 print("Diseases not found: ", not_found_diseases, "(ignoring)")
             
@@ -222,6 +220,50 @@ class CXRDataset(Dataset):
 #             bbox_valid[disease_index] = 1
         
         # return image, labels, image_name, bbox, bbox_valid
+    
+    
+    
+class CXRUnbalancedSampler(Sampler):
+    def __init__(self, cxr_dataset):
+        total_samples = len(cxr_dataset)
+        
+        # Resample the indexes considering the first disease
+        disease = cxr_dataset.classes[0]
+        
+        indexes_with_label = list(enumerate(cxr_dataset.label_index[disease]))
+        
+        positives = sum(label for idx, label in indexes_with_label)
+        negatives = total_samples - positives
+        ratio = negatives // positives
+        
+        OVERSAMPLE_LABEL = 1
+        UNDERSAMPLE_LABEL = 0
+
+        if ratio < 1:
+            OVERSAMPLE_LABEL = 0
+            UNDERSAMPLE_LABEL = 1
+        
+        self.resampled_indexes = []
+        
+        for idx, label in indexes_with_label:
+            if label == UNDERSAMPLE_LABEL:
+                self.resampled_indexes.append(idx)
+            elif label == OVERSAMPLE_LABEL:
+                for _ in range(ratio):
+                    self.resampled_indexes.append(idx)
+                    
+        random.shuffle(self.resampled_indexes)
+        
+        print("\tOversampling ratio: {}, total {} samples (original {})".format(
+            ratio, len(self.resampled_indexes), total_samples))
+
+    
+    def __len__(self):
+        return len(self.resampled_indexes)
+    
+    def __iter__(self):
+        return iter(self.resampled_indexes)
+        
     
     
 class CXRDataset_BBox_only(Dataset):
