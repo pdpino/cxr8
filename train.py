@@ -234,12 +234,13 @@ def tb_write_images(writer, model, dataset, chosen_diseases, epoch, device, imag
 
 def train_model(name="",
                 resume="",
-                base_dir=".",
+                base_dir=utils.BASE_DIR,
                 model_name="v0",
                 chosen_diseases=None,
                 n_epochs=10,
                 batch_size=4,
                 oversample=False,
+                max_os=None,
                 shuffle=False,
                 opt="sgd",
                 opt_params={},
@@ -273,6 +274,7 @@ def train_model(name="",
                                                           chosen_diseases,
                                                           batch_size,
                                                           oversample=oversample,
+                                                          max_os=max_os,
                                                           shuffle=shuffle,
                                                           max_images=train_max_images,
                                                           image_format=image_format,
@@ -430,6 +432,7 @@ def train_model(name="",
         "loss": loss_name,
         "samples (train, val)": "{},{}".format(train_samples, val_samples),
         "train_resnet": train_resnet,
+        "multiple_gpu": multiple_gpu,
     }
     
     def copy_params(params_dict, base_name):
@@ -650,7 +653,7 @@ def parse_args():
     
     parser.add_argument("--name", default="", type=str, help="Additional name to the run")
     parser.add_argument("--resume", default="", type=str, help="If present, resume from another run")
-    parser.add_argument("--base-dir", default="/mnt/data/chest-x-ray-8", type=str, help="Base folder")
+    parser.add_argument("--base-dir", default=utils.BASE_DIR, type=str, help="Base folder")
     parser.add_argument("--model-name", default="v0", type=str, choices=models.AVAILABLE_MODELS,
                         help="Model version to use")
     parser.add_argument("--diseases", default=None, nargs="*", type=str, choices=utils.ALL_DISEASES,
@@ -663,6 +666,7 @@ def parse_args():
     parser.add_argument("-os", "--oversample", default=False, action="store_true",
                         help="If present, oversamples the data to avoid class unbalance. \
                         It uses the first disease and shuffles the data")
+    parser.add_argument("--max-os", default=None, type=int, help="Max oversampling ratio allowed")
     parser.add_argument("--resnet", "--train-resnet", default=False, action="store_true",
                         help="Whether to retrain resnet layers or not")
     parser.add_argument("--image-format", default="RGB", type=str, help="Image format passed to Pillow")
@@ -750,6 +754,7 @@ if __name__ == "__main__":
                       n_epochs=args.epochs,
                       batch_size=args.batch_size,
                       oversample=args.oversample,
+                      max_os=args.max_os,
                       shuffle=args.shuffle,
                       opt=args.opt,
                       opt_params=args.opt_params,

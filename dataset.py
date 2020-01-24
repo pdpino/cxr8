@@ -224,7 +224,7 @@ class CXRDataset(Dataset):
     
     
 class CXRUnbalancedSampler(Sampler):
-    def __init__(self, cxr_dataset):
+    def __init__(self, cxr_dataset, max_os=None):
         total_samples = len(cxr_dataset)
         
         # Resample the indexes considering the first disease
@@ -234,7 +234,7 @@ class CXRUnbalancedSampler(Sampler):
         
         positives = sum(label for idx, label in indexes_with_label)
         negatives = total_samples - positives
-        ratio = negatives // positives
+        ratio = negatives // positives if positives > 0 else 1
         
         OVERSAMPLE_LABEL = 1
         UNDERSAMPLE_LABEL = 0
@@ -242,6 +242,12 @@ class CXRUnbalancedSampler(Sampler):
         if ratio < 1:
             OVERSAMPLE_LABEL = 0
             UNDERSAMPLE_LABEL = 1
+            
+
+        # Set a maximum ratio for oversampling
+        # note that it only affects ratio > 1 (i.e. oversampling positive samples)
+        if max_os is not None:
+            ratio = min(ratio, max_os)
         
         self.resampled_indexes = []
         

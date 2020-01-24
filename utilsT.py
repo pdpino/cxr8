@@ -13,8 +13,8 @@ from dataset import CXRDataset, CXRUnbalancedSampler
 import losses
 
 
-def get_torch_device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def get_torch_device(gpu=True):
+    return torch.device("cuda" if gpu and torch.cuda.is_available() else "cpu")
 
 class RocAucWarning(Warning):
     pass
@@ -32,7 +32,7 @@ def roc_auc_compute_fn(y_preds, y_true):
 def RocAucMetric(**kwargs):
     return EpochMetric(roc_auc_compute_fn, **kwargs)
 
-def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, oversample=False,
+def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, oversample=False, max_os=None,
                  shuffle=False, max_images=None, image_format="RGB"):
     transform_image = get_image_transformation()
 
@@ -44,7 +44,7 @@ def prepare_data(dataset_dir, dataset_type, chosen_diseases, batch_size, oversam
                          image_format=image_format)
 
     if oversample:
-        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=CXRUnbalancedSampler(dataset))
+        dataloader = DataLoader(dataset, batch_size=batch_size, sampler=CXRUnbalancedSampler(dataset, max_os))
     else:
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
     
@@ -57,6 +57,17 @@ def get_image_transformation(image_size=512):
                                transforms.ToTensor(),
                                transforms.Normalize([mean], [1.])
                               ])
+
+# HACK: fix this repeated code
+def get_image_transformation_for_lime(image_size=512):
+    mean = 0.50576189
+    pil_transform = transforms.Compose([transforms.Resize(image_size)])
+    
+    tensor_transform = transforms.Compose([transforms.ToTensor(),
+                                           transforms.Normalize([mean], [1.])
+                                          ])
+    return pil_transform, tensor_transform
+
 
 def get_step_fn(model, optimizer, device, loss_name, loss_params={}, training=True):
     """Creates a step function for an Engine."""

@@ -227,3 +227,22 @@ def load_cms_names(fname, disease_name):
     ])
 
     return TP, FP, TN, FN, cm
+
+
+def get_labels_as_string(labels, chosen_diseases=ALL_DISEASES, sep="|"):
+    """Receives an array of 0s or 1s, returns the present disease names."""
+    
+    if sum(labels) == 0:
+        return "Normal"
+    
+    present_diseases = [chosen_diseases[index] for index, present in enumerate(labels) if present]
+    
+    return sep.join(present_diseases)
+
+
+from PIL import Image
+
+def load_pil_image(image_name):
+    image_fname = BASE_DIR + "/dataset/images/" + image_name
+    pil_image = Image.open(image_fname).convert("RGB")
+    return pil_image

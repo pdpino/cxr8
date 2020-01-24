@@ -1,0 +1,37 @@
+## With bounding boxes:
+
+00010277_000.png - Effusion, Infiltrate, Mass, Pneumonia
+00018427_004.png - Atelectasis, Effusion, Mass
+00021703_001.png - Atelectasis, Effusion, Infiltrate
+00028640_008.png - Effusion, Infiltrate
+00019124_104.png - Pneumothorax
+00019124_090.png - Nodule
+00020318_007.png - Pneumothorax
+00000003_000.png - 0
+00000003_001.png - 0
+00000003_002.png - 0
+00000732_005.png - Cardiomegaly, Pneumothorax
+00012261_001.png - Cardiomegaly, Pneumonia
+00013249_033.png - Cardiomegaly, Pneumonia
+00029808_003.png - Cardiomegaly, Pneumonia
+00022215_012.png - Cardiomegaly, Pneumonia
+00011402_007.png - Cardiomegaly, Pneumonia
+00019018_007.png - Cardiomegaly, Infiltrate
+00021009_001.png - Cardiomegaly, Infiltrate
+00013670_151.png - Cardiomegaly, Infiltrate
+00005066_030.png - Cardiomegaly, Infiltrate, Effusion
+00012288_000.png - Cardiomegaly
+00008399_007.png - Cardiomegaly
+00005532_000.png - Cardiomegaly
+00005532_014.png - Cardiomegaly
+00005532_016.png - Cardiomegaly
+00005827_000.png - Cardiomegaly
+00006912_007.png - Cardiomegaly
+00007037_000.png - Cardiomegaly
+00007043_000.png - Cardiomegaly
+00012741_004.png - Cardiomegaly
+00007551_020.png - Cardiomegaly
+00007735_040.png - Cardiomegaly
+00008339_010.png - Cardiomegaly
+00008365_000.png - Cardiomegaly
+00012686_003.png - Cardiomegaly

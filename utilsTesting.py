@@ -28,6 +28,7 @@ def gen_image_with_bbox(model, dataset, image_name, chosen_diseases, device):
         predictions, _, activations = model(images)
 
     # Copy bbox
+    # TODO: this bbox handling could come from dataset itself (simplifies the valid thing)
     for disease_name in chosen_diseases:
         disease_index = dataset.classes.index(disease_name) # Index in dataset
         
@@ -46,18 +47,7 @@ def gen_image_with_bbox(model, dataset, image_name, chosen_diseases, device):
 
 colors = ["red","blue","cyan","green"]
 
-def plot_image_with_bbox(image, image_name, bboxes, scale=2):
-    """Plot image with its bboxes.
-    
-    scale: factor to reduce the bboxes
-    """
-    # Plot image
-    plt.title(image_name)
-    norm_image_CHW = image_to_range(image)
-    norm_image_HWC = norm_image_CHW.transpose(1, 2, 0)
-    plt.imshow(norm_image_HWC)
-
-    
+def plot_bboxes(bboxes, scale=2):
     # Add bboxes
     ax = plt.gca()
     for index, bbox in enumerate(bboxes):
@@ -76,6 +66,22 @@ def plot_image_with_bbox(image, image_name, bboxes, scale=2):
     if len(bboxes) > 0:
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
+        
+def plot_image_with_bbox(image, image_name, bboxes, scale=2):
+    """Plot image with its bboxes.
+    
+    scale: factor to reduce the bboxes
+    """
+    # Plot image
+    plt.title(image_name)
+    norm_image_CHW = image_to_range(image)
+    norm_image_HWC = norm_image_CHW.transpose(1, 2, 0)
+    plt.imshow(norm_image_HWC)
+    
+    
+    plot_bboxes(bboxes)
+
+
     
 def plot_activation(activations, prediction, gt, chosen_diseases, disease_name=None):
     if disease_name is None:
@@ -83,8 +89,11 @@ def plot_activation(activations, prediction, gt, chosen_diseases, disease_name=N
 
     disease_index = chosen_diseases.index(disease_name)
 
-    pred = prediction[disease_index]
+    # pred = prediction[disease_index]
 
-    plt.title("{} ({}, {:.4f})".format(disease_name, gt[disease_index], pred))
+    # FIXME: this title is printed outside this function (remove unused params)
+    # plt.title("{} ({}, {:.4f})".format(disease_name, gt[disease_index], pred))
+
+    plt.title("Network activation (CAM)")
     plt.imshow(activations[disease_index], cmap="Blues")
     plt.colorbar()

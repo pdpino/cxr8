@@ -1,15 +1,16 @@
 import torch
-
+from torch.nn import DataParallel
 import os
 
 import optimizers
-from models import v0, v1, v2, v3
+from models import v0, v1, v2, v3, v4
 
 _MODELS_DEF = {
     "v0": v0.ResnetBasedModel,
     "v1": v1.ResnetBasedModel,
     "v2": v2.ResnetBasedModel,
     "v3": v3.ResnetBasedModel,
+    "v4": v4.DensenetBasedModel,
 }
 
 AVAILABLE_MODELS = list(_MODELS_DEF)
@@ -41,14 +42,15 @@ def save_model(base_dir, run_name, model_name, experiment_mode, hparam_dict, tra
     }, model_fname)
 
 
-def load_model(base_dir, run_name, experiment_mode="", device=None):
+def load_model(base_dir, run_name, experiment_mode="", device=None, force_multiple_gpu=False):
     model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
     
     checkpoint = torch.load(model_fname)
     hparams = checkpoint["hparams"]
-    model_name = hparams.get("model_name", "v0")
+    model_name = checkpoint.get("model_name", "v0")
     chosen_diseases = hparams["diseases"].split(",")
     train_resnet = hparams["train_resnet"]
+    multiple_gpu = hparams.get("multiple_gpu", False)
     
     def extract_params(name):
         params = {}
@@ -63,6 +65,11 @@ def load_model(base_dir, run_name, experiment_mode="", device=None):
 
     # Load model
     model = init_empty_model(model_name, chosen_diseases, train_resnet)
+    
+    # NOTE: this force param has to be used for cases when the hparam was not saved
+    if force_multiple_gpu or multiple_gpu:
+        model = DataParallel(model)
+    
     if device:
         model = model.to(device)
     
