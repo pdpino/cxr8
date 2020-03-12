@@ -1,0 +1,16 @@
+jupyter
+lime
+matplotlib
+numpy
+pandas
+Pillow
+pytorch-ignite
+scikit-image
+scikit-learn
+scipy
+shap
+tensorboard
+tensorboardX
+torch
+torchvision
+tqdm
