@@ -45,7 +45,7 @@ def save_model(base_dir, run_name, model_name, experiment_mode, hparam_dict, tra
 def load_model(base_dir, run_name, experiment_mode="", device=None, force_multiple_gpu=False):
     model_fname = get_model_fname(base_dir, run_name, experiment_mode=experiment_mode)
     
-    checkpoint = torch.load(model_fname)
+    checkpoint = torch.load(model_fname, map_location=device)
     hparams = checkpoint["hparams"]
     model_name = checkpoint.get("model_name", "v0")
     chosen_diseases = hparams["diseases"].split(",")

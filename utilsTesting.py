@@ -4,6 +4,7 @@ import matplotlib.patches as patches
 import torch
 
 
+# TODO: move this to utils.py
 def image_to_range(image, min_value=0, max_value=1):
     return np.interp(image, (image.min(), image.max()), (min_value, max_value))
 
@@ -25,7 +26,14 @@ def gen_image_with_bbox(model, dataset, image_name, chosen_diseases, device):
 
     # Pass thru model
     with torch.no_grad():
-        predictions, _, activations = model(images)
+        try:
+            predictions, _, activations = model.forward_with_cam(images)
+        except AttributeError:
+            try:
+                predictions, _, activations = model(images)
+            except ValueError:
+                predictions = model(images)
+                activations = None
 
     # Copy bbox
     # TODO: this bbox handling could come from dataset itself (simplifies the valid thing)
@@ -47,7 +55,7 @@ def gen_image_with_bbox(model, dataset, image_name, chosen_diseases, device):
 
 colors = ["red","blue","cyan","green"]
 
-def plot_bboxes(bboxes, scale=2):
+def plot_bboxes(bboxes, scale=2, show_legend=True):
     # Add bboxes
     ax = plt.gca()
     for index, bbox in enumerate(bboxes):
@@ -63,7 +71,7 @@ def plot_bboxes(bboxes, scale=2):
                                  linewidth=1, edgecolor=color, facecolor="none", label=disease)
         ax.add_patch(rect)
 
-    if len(bboxes) > 0:
+    if len(bboxes) > 0 and show_legend:
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
         

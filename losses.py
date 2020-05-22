@@ -6,6 +6,19 @@ class LossNotFound(Exception):
     pass
 
 
+def bce(output, target, epsilon=1e-5):
+    """Computes binary cross entropy loss.
+    
+    If a multi-label array is given, the BCE is summed across labels.
+    """
+    output = output.clamp(min=epsilon, max=1-epsilon)
+    target = target.float()
+
+    loss = -target * torch.log(output) - (1 - target) * torch.log(1 - output)
+
+    return torch.sum(loss)
+
+
 def weighted_bce(output, target, epsilon=1e-5):
     """Computes weighted binary cross entropy loss.
     
@@ -81,6 +94,7 @@ def focal_loss(output, target, alpha=0.75, gamma=2, epsilon=1e-5):
 
 
 _LOSS_FNS = {
+    "bce": bce,
     "wbce": weighted_bce,
     "wbce_loss": weighted_bce,
     "wbce_by_disease": weighted_bce_by_disease,

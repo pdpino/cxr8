@@ -39,6 +39,8 @@ class ResnetBasedModel(nn.Module):
 #         return None
         
     def forward(self, x):
+        # FIXME: this model won't train if returns one value! needs to return 3 values 
+        
         x = self.model_ft.conv1(x)
         x = self.model_ft.bn1(x)
         x = self.model_ft.relu(x)
@@ -69,7 +71,37 @@ class ResnetBasedModel(nn.Module):
         
         x = self.prediction(x) # n_samples, n_diseases
         
+#         return x
         return x, embedding, activations
+
+    def forward_with_cam(self, x):
+        x = self.model_ft.conv1(x)
+        x = self.model_ft.bn1(x)
+        x = self.model_ft.relu(x)
+        x = self.model_ft.maxpool(x)
+
+        x = self.model_ft.layer1(x)
+        x = self.model_ft.layer2(x)
+        x = self.model_ft.layer3(x)
+        x = self.model_ft.layer4(x) # n_samples, 2048, height=16, width=16
+
+        
+        pred_weights, pred_bias_unused = list(self.prediction.parameters()) # size: n_diseases, n_features = 2048
+        # x: activations from prev layer # size: n_samples, n_features, height = 16, width = 16
+        # bbox: for each sample, multiply n_features dimensions
+        # --> activations: n_samples, n_diseases, height, width
+        activations = torch.matmul(pred_weights, x.transpose(1, 2)).transpose(1, 2)
+        
+        x = self.global_pool(x)
+        
+        x = x.view(x.size(0), -1)
+        
+        embedding = x
+        
+        x = self.prediction(x) # n_samples, n_diseases
+        
+        return x, embedding, activations
+        
 
     
     def forward_with_gradcam(self, x, disease_index=0):

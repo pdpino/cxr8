@@ -26,7 +26,7 @@ class ResnetBasedModel(nn.Module):
             nn.Conv2d(n_features, 2048, kernel_size=3, padding=1, stride=1, bias=False),
         )
         self.global_pool = nn.Sequential(
-            nn.MaxPool2d(32) # 32 is the maximum value of S --> Global Pooling
+            nn.MaxPool2d(16) # 32
         )
         self.prediction = nn.Sequential(
             nn.Dropout2d(0.2),

@@ -1,7 +1,8 @@
 from datetime import datetime
 import time
 
-BASE_DIR = "/mnt/data/chest-x-ray-8" # In server
+# BASE_DIR = "/mnt/data/chest-x-ray-8"
+BASE_DIR = "/mnt/workspace/chest-x-ray-8"
 DATASET_DIR = BASE_DIR + "/dataset"
 CMS_DIR = BASE_DIR + "/cms"
 

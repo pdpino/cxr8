@@ -5,7 +5,7 @@ from torchvision.transforms import functional as F
 import pandas as pd
 import numpy as np
 from PIL import Image
-from filelock import FileLock
+# from filelock import FileLock
 import os
 import random
 
@@ -102,9 +102,9 @@ class CXRDataset(Dataset):
         # Load the image with a lock
         image_fname = os.path.join(self.image_dir, image_name)
         try:
-            # REVIEW: Is lock necessary for read operation?
-            with FileLock(image_fname + ".lock"):
-                image = Image.open(image_fname).convert(self.image_format)
+            ## # REVIEW: Is lock necessary for read operation?
+            ## with FileLock(image_fname + ".lock"):
+            image = Image.open(image_fname).convert(self.image_format)
         except OSError as e:
             print(e)
             print("({}) Failed to load image, may be broken: ".format(self.dataset_type, image_fname))
